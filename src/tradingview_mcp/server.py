@@ -70,6 +70,7 @@ from tradingview_mcp.core.utils.validators import (
     sanitize_exchange,
     normalize_tradingview_symbol,
     normalize_yahoo_symbol,
+    is_stock_exchange,
 )
 from tradingview_mcp.core.errors import (
     BatchExecutionError,
@@ -155,18 +156,23 @@ def top_losers(exchange: str = "KUCOIN", timeframe: str = "15m", limit: int = 25
 
 
 @mcp.tool()
-def bollinger_scan(exchange: str = "KUCOIN", timeframe: str = "4h", bbw_threshold: float = 0.04, limit: int = 50) -> list[dict]:
+def bollinger_scan(exchange: str = "KUCOIN", timeframe: str = "4h", bbw_threshold: float = None, limit: int = 50) -> list[dict]:
     """Scan for assets with low Bollinger Band Width (squeeze detection). Works with crypto and stocks.
 
     Args:
-        exchange: Exchange — crypto: KUCOIN, BINANCE, BYBIT, MEXC; stocks: EGX, BIST, NASDAQ, NYSE, BURSA, HKEX, SSE, SZSE, TWSE, TPEX
+        exchange: Exchange — crypto: KUCOIN, BINANCE, BYBIT, MEXC; stocks: IDX (Indonesia/BEI), EGX, BIST, NASDAQ, NYSE, BURSA, HKEX, SSE, SZSE, TWSE, TPEX
         timeframe: One of 5m, 15m, 1h, 4h, 1D, 1W, 1M
-        bbw_threshold: Maximum BBW value to filter (default 0.04)
+        bbw_threshold: Maximum BBW value to filter. Auto-defaults: 0.15 for stock exchanges
+                       (IDX, NASDAQ, etc.) and 0.04 for crypto. Override as needed.
         limit: Number of rows to return (max 100)
     """
     exchange = sanitize_exchange(exchange, "KUCOIN")
     timeframe = sanitize_timeframe(timeframe, "4h")
     limit = max(1, min(limit, 100))
+    # Auto-scale: stock prices are in local currency units so BBW is naturally
+    # much larger than crypto. Default 0.04 filters out everything for stocks.
+    if bbw_threshold is None:
+        bbw_threshold = 0.15 if is_stock_exchange(exchange) else 0.04
     rows = fetch_bollinger_analysis(exchange, timeframe=timeframe, bbw_filter=bbw_threshold, limit=limit)
     return [{"symbol": r["symbol"], "changePercent": r["changePercent"], "indicators": dict(r["indicators"])} for r in rows]
 
