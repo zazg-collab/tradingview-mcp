@@ -139,7 +139,11 @@ def fetch_bollinger_analysis(
             metrics = compute_metrics(indicators)
             if not metrics or metrics.get("bbw") is None:
                 continue
-            if bbw_filter is not None and (metrics["bbw"] >= bbw_filter or metrics["bbw"] <= 0):
+            bbw = metrics["bbw"]
+            if bbw <= 0:
+                continue
+            # Optional upper-bound filter (caller can still pass bbw_filter for hard cutoff)
+            if bbw_filter is not None and bbw >= bbw_filter:
                 continue
             if not (indicators.get("EMA50") and indicators.get("RSI")):
                 continue
@@ -157,13 +161,16 @@ def fetch_bollinger_analysis(
                         EMA50=indicators.get("EMA50"),
                         RSI=indicators.get("RSI"),
                         volume=indicators.get("volume"),
+                        bbw=round(bbw, 4),
                     ),
                 )
             )
         except (TypeError, ZeroDivisionError, KeyError):
             continue
 
-    rows.sort(key=lambda x: x["changePercent"], reverse=True)
+    # Sort by BBW ascending — tightest squeeze first, regardless of asset class.
+    # No fixed threshold: the caller decides how many results to take via `limit`.
+    rows.sort(key=lambda x: x["indicators"].get("bbw") or float("inf"))
     return rows[:limit]
 
 

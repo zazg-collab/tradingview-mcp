@@ -21,6 +21,7 @@ class IndicatorMap(TypedDict, total=False):
     EMA50: Optional[float]
     RSI: Optional[float]
     volume: Optional[float]
+    bbw: Optional[float]
 
 
 class Row(TypedDict):
