@@ -67,6 +67,7 @@ from tradingview_mcp.core.services.backtest_service import (
 )
 from tradingview_mcp.core.services.idx_fundamental_service import screen_idx_fundamental
 from tradingview_mcp.core.services.idx_decision_service import get_idx_stock_decision
+from tradingview_mcp.core.services.idx_fibonacci_service import analyze_idx_fibonacci
 from tradingview_mcp.core.utils.validators import (
     sanitize_timeframe,
     sanitize_exchange,
@@ -989,6 +990,41 @@ def idx_fundamental_screener(
         max_de=max_de,
         min_revenue_growth=min_revenue_growth,
     )
+
+
+@mcp.tool()
+def get_fibonacci_levels(
+    ticker: str,
+    lookback: str = "52W",
+    timeframe: str = "1D",
+) -> dict:
+    """
+    Fibonacci retracement & extension analysis untuk saham IDX.
+
+    Menghitung 7 level retracement (0%, 23.6%, 38.2%, 50%, 61.8%, 78.6%, 100%)
+    dan 3 level extension (127.2%, 161.8%, 261.8%) berdasarkan swing high/low.
+
+    Sumber swing high/low (otomatis, priority order):
+      1. TV Screener: 52W high/low, 6M, 3M, 1M (paling akurat)
+      2. Pivot R3/S3 dari tradingview_ta (fallback)
+      3. yfinance historical OHLCV (fallback terakhir)
+
+    Output:
+      - retracement_levels : 7 level dengan harga IDR
+      - extension_levels   : 3 level proyeksi
+      - key_levels         : jarak % ke tiap level dari harga saat ini
+      - price_position     : zona saat ini, support/resistance Fib terdekat
+      - golden pocket      : zona 61.8% (entry/reversal kunci)
+      - context            : RSI, EMA50, EMA200, ATR%, volume ratio
+
+    Lookback options: "1M", "3M", "6M", "52W" (default), "ALL"
+
+    Contoh:
+        get_fibonacci_levels("BBCA")
+        get_fibonacci_levels("TLKM", lookback="3M")
+        get_fibonacci_levels("ZATA", lookback="52W", timeframe="1W")
+    """
+    return analyze_idx_fibonacci(ticker=ticker, lookback=lookback, timeframe=timeframe)
 
 
 @mcp.tool()

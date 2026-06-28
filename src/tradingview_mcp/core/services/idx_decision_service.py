@@ -43,6 +43,13 @@ from tradingview_mcp.core.services.indicators import (
     extract_extended_indicators,
 )
 
+# ── tradingview-screener ───────────────────────────────────────────────────────
+try:
+    from tradingview_screener import Query
+    _SCREENER_AVAILABLE = True
+except ImportError:
+    _SCREENER_AVAILABLE = False
+
 # ── constants ──────────────────────────────────────────────────────────────────
 _IDX_SCREENER = "indonesia"
 
@@ -53,6 +60,11 @@ _IDR_VAL_LOW    = 500_000_000      # 500 juta IDR/hari  → tipis
 _IDR_VAL_MODEST = 2_000_000_000    # 2 miliar IDR/hari  → cukup liquid
 _IDR_VOL_FLOOR  = 50_000           # 50K lembar/hari    → minimal
 _IDR_VOL_LOW    = 200_000          # 200K lembar/hari   → masih tipis
+
+# ── module-level cache untuk IDX universe change ───────────────────────────────
+# Cache berlaku selama session (dict kosong = belum di-fetch)
+# Key: "data" → list[float], "ticker_map" → dict[str, float]
+_IDX_UNIVERSE_CACHE: dict = {}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -66,6 +78,97 @@ def _clean_ticker(ticker: str) -> str:
 def _yf_ticker(ticker: str) -> str:
     t = _clean_ticker(ticker)
     return t if t.endswith(".JK") else f"{t}.JK"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# HELPERS — Cross-sectional percentile rank (Layer A4)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _fetch_idx_universe_changes() -> tuple[list[float], dict[str, float]]:
+    """
+    Scan seluruh IDX universe dan ambil % change hari ini dari TV screener.
+
+    Returns:
+        (all_changes, ticker_map) — list semua changes + dict ticker→change
+        Cache di module-level, di-refresh per session.
+    """
+    if _IDX_UNIVERSE_CACHE.get("data"):
+        return _IDX_UNIVERSE_CACHE["data"], _IDX_UNIVERSE_CACHE["ticker_map"]
+
+    if not _SCREENER_AVAILABLE:
+        return [], {}
+
+    try:
+        _, df = (
+            Query()
+            .set_markets("indonesia")
+            .select("change", "volume")
+            .limit(1100)          # IDX punya ~900 saham aktif
+            .get_scanner_data()
+        )
+    except Exception:
+        return [], {}
+
+    if df is None or df.empty or "change" not in df.columns:
+        return [], {}
+
+    # ticker kolom format: "IDX:BBCA" → strip prefix
+    ticker_map: dict[str, float] = {}
+    for _, row in df.iterrows():
+        raw_ticker = str(row.get("ticker", ""))
+        change_val = row.get("change")
+        if change_val is None:
+            continue
+        # Strip exchange prefix jika ada
+        short = raw_ticker.split(":")[-1]
+        try:
+            ticker_map[short] = float(change_val)
+        except (ValueError, TypeError):
+            continue
+
+    all_changes = list(ticker_map.values())
+
+    _IDX_UNIVERSE_CACHE["data"]       = all_changes
+    _IDX_UNIVERSE_CACHE["ticker_map"] = ticker_map
+    return all_changes, ticker_map
+
+
+def _fetch_idx_change_rank(ticker: str) -> Optional[float]:
+    """
+    Hitung percentile rank (0.0–1.0) dari % change saham vs seluruh universe IDX.
+
+    0.0 = paling bawah (worst performer hari ini)
+    1.0 = paling atas (top performer hari ini)
+
+    Returns None jika data tidak tersedia.
+    """
+    all_changes, ticker_map = _fetch_idx_universe_changes()
+    if not all_changes:
+        return None
+
+    clean = _clean_ticker(ticker)
+    stock_change = ticker_map.get(clean)
+    if stock_change is None:
+        # Fallback: ambil dari screener direct untuk saham ini
+        try:
+            _, df = (
+                Query()
+                .set_markets("indonesia")
+                .select("change")
+                .set_tickers([f"IDX:{clean}"])
+                .get_scanner_data()
+            )
+            if not df.empty:
+                stock_change = float(df.iloc[0]["change"])
+        except Exception:
+            return None
+
+    if stock_change is None:
+        return None
+
+    count_below = sum(1 for c in all_changes if c < stock_change)
+    pct_rank = count_below / len(all_changes)
+    return round(pct_rank, 4)
 
 
 def _calc_obv(hist: pd.DataFrame) -> pd.Series:
@@ -443,9 +546,13 @@ def get_idx_stock_decision(ticker: str, timeframe: str = "1D") -> dict:
     liq = _idr_liquidity_check(avg_vol_for_liq, close)
 
     # ── 3. Layer A–D: 3-layer stock scoring ───────────────────────────────────
+    # Fetch cross-sectional percentile rank dari TV screener (Layer A4)
+    # None = tidak tersedia, compute_stock_score akan skip section ini
+    change_pct_rank = _fetch_idx_change_rank(clean)
+
     # Gunakan currency="USD" agar compute_stock_score tidak apply EGP thresholds
     # (liquidity assessment kita override dengan IDR check di atas)
-    score_result = compute_stock_score(ind, change_pct_rank=None, currency="USD")
+    score_result = compute_stock_score(ind, change_pct_rank=change_pct_rank, currency="USD")
     if not score_result:
         return {"error": f"Tidak bisa compute stock score untuk {full_symbol}"}
 
@@ -565,11 +672,13 @@ def get_idx_stock_decision(ticker: str, timeframe: str = "1D") -> dict:
 
         # Scoring
         "scores": {
-            "ta_base_score"  : base_score,
-            "liq_penalty"    : -liq_penalty_delta,
-            "bandar_adj"     : bandar_adj,
-            "final_score"    : final_score,
-            "score_breakdown": score_result.get("breakdown", {}),
+            "ta_base_score"    : base_score,
+            "liq_penalty"      : -liq_penalty_delta,
+            "bandar_adj"       : bandar_adj,
+            "final_score"      : final_score,
+            "score_breakdown"  : score_result.get("breakdown", {}),
+            "change_pct_rank"  : change_pct_rank,          # 0.0=worst, 1.0=best vs IDX universe
+            "universe_size"    : len(_IDX_UNIVERSE_CACHE.get("data", [])),
         },
 
         "trend_state"  : score_result.get("trend_state", "Unknown"),
