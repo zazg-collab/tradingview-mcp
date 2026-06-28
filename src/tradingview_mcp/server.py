@@ -68,6 +68,10 @@ from tradingview_mcp.core.services.backtest_service import (
 from tradingview_mcp.core.services.idx_fundamental_service import screen_idx_fundamental
 from tradingview_mcp.core.services.idx_decision_service import get_idx_stock_decision
 from tradingview_mcp.core.services.idx_fibonacci_service import analyze_idx_fibonacci
+from tradingview_mcp.core.services.idx_screener_service import (
+    screen_idx_stocks,
+    analyze_idx_index,
+)
 from tradingview_mcp.core.utils.validators import (
     sanitize_timeframe,
     sanitize_exchange,
@@ -922,6 +926,58 @@ def futures_watchlist() -> dict:
     Use these symbols with futures_category_snapshot or coin_analysis for deeper analysis.
     """
     return get_futures_watchlist()
+
+
+# ── IDX Technical Screener & Index Analysis ───────────────────────────────────
+
+@mcp.tool()
+def idx_stock_screener(
+    timeframe:    str = "1D",
+    min_score:    int = 55,
+    index_filter: str = "",
+    limit:        int = 20,
+) -> dict:
+    """Production stock ranking engine untuk IDX — temukan saham terbaik hari ini.
+
+    Scan semua saham IDX, score tiap saham (0-100), dan tampilkan:
+    - qualified_trades: saham dengan setup actionable (score ≥ 70 + TQ ≥ 65)
+    - watchlist: saham menarik tapi setup belum optimal
+    - grade_distribution: penyebaran grade di universe yang discan
+
+    Args:
+        timeframe:    Interval analisis — 1D (default), 1W, 4H, 1H
+        min_score:    Minimum stock score 0-100 (default 55)
+        index_filter: Filter ke index tertentu — LQ45, IDX30, IDX80, KOMPAS100,
+                      JII, IDXHIDIV20, IDXBUMN20 (kosong = semua IDX)
+        limit:        Jumlah hasil maksimal (max 50, default 20)
+    """
+    timeframe = sanitize_timeframe(timeframe, "1D")
+    min_score = max(0, min(100, min_score))
+    limit     = max(1, min(50, limit))
+    return screen_idx_stocks(timeframe, min_score, index_filter, limit)
+
+
+@mcp.tool()
+def idx_index_analysis(
+    index:     str = "LQ45",
+    timeframe: str = "1D",
+    limit:     int = 45,
+) -> dict:
+    """Analisis performa konstituen sebuah IDX index — breadth, sektor, dan top movers.
+
+    Menampilkan market breadth (advancing/declining), sentiment index,
+    sector breakdown ranked by avg change, top 5 gainers, top 5 losers,
+    dan detail semua saham dalam index.
+
+    Args:
+        index:     Index yang dianalisis — LQ45 (default), IDX30, IDX80, KOMPAS100,
+                   JII, IDXHIDIV20, IDXBUMN20
+        timeframe: Interval analisis — 1D (default), 1W, 4H, 1H
+        limit:     Jumlah saham yang ditampilkan detail (max 100)
+    """
+    timeframe = sanitize_timeframe(timeframe, "1D")
+    limit     = max(1, min(100, limit))
+    return analyze_idx_index(index.strip().upper(), timeframe, limit)
 
 
 # ── IDX Fundamental Screener ───────────────────────────────────────────────────
