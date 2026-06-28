@@ -66,6 +66,7 @@ from tradingview_mcp.core.services.backtest_service import (
     walk_forward_backtest,
 )
 from tradingview_mcp.core.services.idx_fundamental_service import screen_idx_fundamental
+from tradingview_mcp.core.services.idx_decision_service import get_idx_stock_decision
 from tradingview_mcp.core.utils.validators import (
     sanitize_timeframe,
     sanitize_exchange,
@@ -988,6 +989,35 @@ def idx_fundamental_screener(
         max_de=max_de,
         min_revenue_growth=min_revenue_growth,
     )
+
+
+@mcp.tool()
+def get_stock_decision(
+    ticker: str,
+    timeframe: str = "1D",
+) -> dict:
+    """
+    Keputusan investasi komprehensif untuk saham IDX (Bursa Efek Indonesia).
+
+    Menggabungkan 3-layer technical scoring (100 poin) dengan Bandarmology Signal
+    (OBV, CMF, MFI, VWAP, divergence detection) untuk output BUY / HOLD / SELL / AVOID.
+
+    Layer A — Trend & Momentum (50 poin): EMA structure, RSI, MACD, relative performance
+    Layer B — Konfirmasi (20 poin): volume ratio, ADX trend strength
+    Layer C — Risk-Adjusted (15 poin): volatility control (ATR%), drawdown stability
+    Layer D — Fundamental Overlay (15 poin): TV recommendation, MA+oscillator agreement
+    Layer E — Bandarmology (±25 poin): OBV/CMF/MFI/VWAP money flow + divergence detection
+
+    Liquidity: threshold berbasis IDR (traded value harian, volume lembar)
+    Grade: Elite (85+) / Strong (70+) / Watchlist (55+) / Avoid (<55)
+    Decision: BUY / HOLD / AVOID + confidence HIGH/MODERATE/LOW
+
+    Contoh penggunaan:
+        get_stock_decision("BBCA")
+        get_stock_decision("TLKM", timeframe="1W")
+        get_stock_decision("ZATA")
+    """
+    return get_idx_stock_decision(ticker=ticker, timeframe=timeframe)
 
 
 # ── Resource ───────────────────────────────────────────────────────────────────
