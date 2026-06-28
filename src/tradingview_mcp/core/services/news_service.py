@@ -7,8 +7,7 @@ No API keys required. Pulls from free, public RSS feeds.
 Sources:
   crypto:    CoinDesk, Cointelegraph
   stocks:    Yahoo Finance, MarketWatch (Top + Real-Time), CNBC
-  indonesia: Kontan, Bisnis.com, CNBC Indonesia, IDX Channel, Katadata,
-             Emiten News, Pasar Modal Inilah, Stockbit News, IDX Official
+  indonesia: Kontan, CNBC Indonesia, IDX Channel, Katadata, Emiten News
   all:       Combined
 
 Note (2026-05-14): Original Reuters feeds (feeds.reuters.com) are deprecated
@@ -42,16 +41,14 @@ RSS_FEEDS: dict[str, list[dict]] = {
         {"url": "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100003114", "name": "CNBC Top News"},
     ],
     # Indonesian stock market news — IDX/BEI focused
+    # Verified working (2026-06): kontan ✓, cnbcindonesia ✓, idxchannel ✓, katadata ✓, emitennews ✓
+    # Removed: bisnis.com (all RSS paths 404), pasarmodal.inilah.com (timeout), idx.co.id (403)
     "indonesia": [
         {"url": "https://investasi.kontan.co.id/rss", "name": "Kontan Investasi"},
-        {"url": "https://www.bisnis.com/market/rss", "name": "Bisnis.com Market"},
         {"url": "https://www.cnbcindonesia.com/market/rss", "name": "CNBC Indonesia Market"},
         {"url": "https://www.idxchannel.com/rss", "name": "IDX Channel"},
         {"url": "https://katadata.co.id/rss", "name": "Katadata"},
-        {"url": "https://emitennews.com/feed", "name": "Emiten News"},
-        {"url": "https://pasarmodal.inilah.com/rss", "name": "Pasar Modal Inilah"},
-        {"url": "https://stockbit.com/StockbitNews/rss", "name": "Stockbit News"},
-        {"url": "https://www.idx.co.id/id/rss", "name": "IDX Official"},
+        {"url": "https://emitennews.com/?feed=rss2", "name": "Emiten News"},
     ],
     "all": [
         {"url": "https://finance.yahoo.com/news/rssindex", "name": "Yahoo Finance"},
