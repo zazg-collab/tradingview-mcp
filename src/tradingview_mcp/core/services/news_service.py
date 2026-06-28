@@ -5,9 +5,11 @@ Uses feedparser (already installed as part of agent-reach dependencies).
 No API keys required. Pulls from free, public RSS feeds.
 
 Sources:
-  crypto: CoinDesk, Cointelegraph
-  stocks: Yahoo Finance, MarketWatch (Top + Real-Time), CNBC
-  all:    Combined
+  crypto:    CoinDesk, Cointelegraph
+  stocks:    Yahoo Finance, MarketWatch (Top + Real-Time), CNBC
+  indonesia: Kontan, Bisnis.com, CNBC Indonesia, IDX Channel, Katadata,
+             Emiten News, Pasar Modal Inilah, Stockbit News, IDX Official
+  all:       Combined
 
 Note (2026-05-14): Original Reuters feeds (feeds.reuters.com) are deprecated
 since ~2020 — they return zero entries. Replaced with Yahoo Finance,
@@ -38,6 +40,18 @@ RSS_FEEDS: dict[str, list[dict]] = {
         {"url": "https://feeds.content.dowjones.io/public/rss/mw_topstories", "name": "MarketWatch Top Stories"},
         {"url": "https://feeds.content.dowjones.io/public/rss/mw_realtimeheadlines", "name": "MarketWatch Real-Time"},
         {"url": "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100003114", "name": "CNBC Top News"},
+    ],
+    # Indonesian stock market news — IDX/BEI focused
+    "indonesia": [
+        {"url": "https://investasi.kontan.co.id/rss", "name": "Kontan Investasi"},
+        {"url": "https://www.bisnis.com/market/rss", "name": "Bisnis.com Market"},
+        {"url": "https://www.cnbcindonesia.com/market/rss", "name": "CNBC Indonesia Market"},
+        {"url": "https://www.idxchannel.com/rss", "name": "IDX Channel"},
+        {"url": "https://katadata.co.id/rss", "name": "Katadata"},
+        {"url": "https://emitennews.com/feed", "name": "Emiten News"},
+        {"url": "https://pasarmodal.inilah.com/rss", "name": "Pasar Modal Inilah"},
+        {"url": "https://stockbit.com/StockbitNews/rss", "name": "Stockbit News"},
+        {"url": "https://www.idx.co.id/id/rss", "name": "IDX Official"},
     ],
     "all": [
         {"url": "https://finance.yahoo.com/news/rssindex", "name": "Yahoo Finance"},

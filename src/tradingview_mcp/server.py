@@ -548,12 +548,18 @@ def market_sentiment(symbol: str, category: str = "all", limit: int = 20) -> dic
 
 @mcp.tool()
 def financial_news(symbol: str = None, category: str = "stocks", limit: int = 10) -> dict:
-    """Real-time financial news from RSS feeds (Reuters, CoinDesk, etc.)
+    """Real-time financial news from RSS feeds.
 
     Args:
-        symbol: Optional symbol filter ("AAPL", "BTC"). None = all news.
-        category: Feed category ("crypto", "stocks", "all")
-        limit: Max number of news items
+        symbol: Optional ticker filter. For IDX stocks use ticker only e.g. "BBCA", "TPIA".
+                For US stocks: "AAPL", "TSLA". None = all news from category.
+        category: Feed category:
+                  - "indonesia" → IDX/BEI news: Kontan, Bisnis.com, CNBC Indonesia,
+                    IDX Channel, Katadata, Emiten News, Pasar Modal Inilah, Stockbit News, IDX Official
+                  - "stocks"    → Global: Yahoo Finance, MarketWatch, CNBC
+                  - "crypto"    → CoinDesk, CoinTelegraph
+                  - "all"       → Global stocks + crypto combined
+        limit: Max number of news items (default 10)
     """
     return fetch_news_summary(symbol, category, limit)
 
