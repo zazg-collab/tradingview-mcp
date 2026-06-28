@@ -65,6 +65,7 @@ from tradingview_mcp.core.services.backtest_service import (
     compare_strategies as _compare_strategies,
     walk_forward_backtest,
 )
+from tradingview_mcp.core.services.idx_fundamental_service import screen_idx_fundamental
 from tradingview_mcp.core.utils.validators import (
     sanitize_timeframe,
     sanitize_exchange,
@@ -919,6 +920,74 @@ def futures_watchlist() -> dict:
     Use these symbols with futures_category_snapshot or coin_analysis for deeper analysis.
     """
     return get_futures_watchlist()
+
+
+# ── IDX Fundamental Screener ───────────────────────────────────────────────────
+
+@mcp.tool()
+def idx_fundamental_screener(
+    sort_by: str = "market_cap",
+    ascending: bool = False,
+    limit: int = 50,
+    sector: Optional[str] = None,
+    min_market_cap: Optional[float] = None,
+    max_pe: Optional[float] = None,
+    min_roe: Optional[float] = None,
+    min_dividend_yield: Optional[float] = None,
+    max_de: Optional[float] = None,
+    min_revenue_growth: Optional[float] = None,
+) -> dict:
+    """Screen all ~860 IDX/BEI stocks by fundamental criteria using TradingView data.
+
+    Returns market cap, P/E, P/B, P/S, ROE, dividend yield, debt/equity,
+    revenue growth, EPS, gross/net margin, current ratio, sector, and industry
+    for every IDX stock in a single call.
+
+    Args:
+        sort_by:            Column to sort by. Options:
+                            market_cap, pe, pb, ps, roe, dividend_yield, de,
+                            revenue_growth, eps, gross_margin, net_margin,
+                            current_ratio, change, price, volume.
+        ascending:          Sort direction. Default False (highest first).
+        limit:              Max results. Default 50.
+        sector:             Filter by sector (substring, case-insensitive).
+                            Examples: "Finance", "Technology", "Consumer",
+                            "Energy", "Healthcare", "Utilities", "Transportation".
+        min_market_cap:     Minimum market cap in IDR trillion (e.g. 10.0 = 10T IDR).
+        max_pe:             Maximum P/E ratio (TTM). Excludes negative P/E.
+        min_roe:            Minimum Return on Equity % (e.g. 15 = 15%).
+        min_dividend_yield: Minimum dividend yield % (e.g. 3 = 3%).
+        max_de:             Maximum Debt/Equity ratio.
+        min_revenue_growth: Minimum revenue growth % TTM.
+
+    Examples:
+        # Blue-chip value stocks
+        idx_fundamental_screener(min_market_cap=50, max_pe=15, min_roe=15)
+
+        # High-dividend income stocks
+        idx_fundamental_screener(sort_by="dividend_yield", min_dividend_yield=5)
+
+        # Best-quality banking sector
+        idx_fundamental_screener(sector="Finance", sort_by="roe", min_roe=10)
+
+        # Growth stocks with strong revenue
+        idx_fundamental_screener(sort_by="revenue_growth", min_revenue_growth=20)
+
+        # Low-debt profitable small caps
+        idx_fundamental_screener(max_pe=10, max_de=0.5, min_roe=15, limit=20)
+    """
+    return screen_idx_fundamental(
+        sort_by=sort_by,
+        ascending=ascending,
+        limit=limit,
+        sector=sector,
+        min_market_cap=min_market_cap,
+        max_pe=max_pe,
+        min_roe=min_roe,
+        min_dividend_yield=min_dividend_yield,
+        max_de=max_de,
+        min_revenue_growth=min_revenue_growth,
+    )
 
 
 # ── Resource ───────────────────────────────────────────────────────────────────
