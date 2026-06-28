@@ -91,7 +91,7 @@ mcp = FastMCP(
     instructions=(
         "Multi-market screener backed by TradingView. "
         "Supports crypto exchanges (KuCoin, Binance, Bybit, MEXC, etc.), stock markets "
-        "(EGX, BIST, NASDAQ, NYSE, Bursa Malaysia, HKEX, SSE, SZSE, TWSE, TPEX), "
+        "(IDX Indonesia/BEI, EGX, BIST, NASDAQ, NYSE, Bursa Malaysia, HKEX, SSE, SZSE, TWSE, TPEX), "
         "and futures markets (CME, COMEX, NYMEX, CBOT — equity index, energy, metals, "
         "agriculture, rates, forex, crypto futures). "
         "Tools: top_gainers, top_losers, bollinger_scan, coin_analysis, multi_agent_analysis, "
@@ -108,7 +108,7 @@ def top_gainers(exchange: str = "KUCOIN", timeframe: str = "15m", limit: int = 2
     """Return top gainers for an exchange and timeframe using Bollinger Band analysis.
 
     Args:
-        exchange: Exchange name — crypto: KUCOIN, BINANCE, BYBIT, MEXC; stocks: EGX, BIST, NASDAQ, NYSE, BURSA, HKEX, SSE, SZSE, TWSE, TPEX
+        exchange: Exchange name — crypto: KUCOIN, BINANCE, BYBIT, MEXC; stocks: IDX (Indonesia/BEI), EGX, BIST, NASDAQ, NYSE, BURSA, HKEX, SSE, SZSE, TWSE, TPEX
         timeframe: One of 5m, 15m, 1h, 4h, 1D, 1W, 1M
         limit: Number of rows to return (max 50)
 
@@ -133,7 +133,7 @@ def top_gainers(exchange: str = "KUCOIN", timeframe: str = "15m", limit: int = 2
 
 @mcp.tool()
 def top_losers(exchange: str = "KUCOIN", timeframe: str = "15m", limit: int = 25) -> list[dict] | dict:
-    """Return top losers for an exchange and timeframe. Supports crypto (KUCOIN, BINANCE, MEXC) and stocks (EGX, BIST, NASDAQ).
+    """Return top losers for an exchange and timeframe. Supports crypto (KUCOIN, BINANCE, MEXC) and stocks (IDX, EGX, BIST, NASDAQ).
 
     Returns ``list[dict]`` on success, or an error envelope on total upstream
     failure (``{"error": {"code": "ALL_BATCHES_FAILED", ...}}``).

@@ -23,6 +23,7 @@ STOCK_EXCHANGES: Set[str] = {
     "sse", "szse", "chn",
     "twse", "tpex",
     "tadawul", "tasi",                  # Saudi Stock Exchange (Tadawul) — All Share Index (TASI)
+    "idx", "bei", "idxbei",             # Indonesian Stock Exchange (Bursa Efek Indonesia)
 }
 
 EXCHANGE_SCREENER = {
@@ -67,6 +68,10 @@ EXCHANGE_SCREENER = {
     # Saudi Stock Market (Tadawul) — TradingView scanner uses /ksa/
     "tadawul": "ksa",
     "tasi": "ksa",          # alias: Tadawul All Share Index
+    # Indonesian Stock Exchange (Bursa Efek Indonesia / IDX) — TradingView scanner uses /indonesia/
+    "idx": "indonesia",
+    "bei": "indonesia",     # Bursa Efek Indonesia (alternate)
+    "idxbei": "indonesia",  # IDX BEI (alternate)
 }
 
 # Venues TradingView serves for single-symbol TA (tradingview-ta) but NOT via the
@@ -111,6 +116,9 @@ _EXCHANGE_TV_PREFIX: dict = {
     "tpex": "TPEX",
     "tadawul": "TADAWUL",
     "tasi": "TADAWUL",
+    "idx": "IDX",
+    "bei": "IDX",
+    "idxbei": "IDX",
 }
 
 _YAHOO_SYMBOL_ALIASES: dict = {
@@ -119,6 +127,11 @@ _YAHOO_SYMBOL_ALIASES: dict = {
     "^TWII": "^TWII",
     "TWSE:TAIEX": "^TWII",
     "TWSE:IX0001": "^TWII",
+    # Indonesian index aliases → Yahoo Finance format
+    "IHSG": "^JKSE",
+    "JCI": "^JKSE",
+    "IDX:COMPOSITE": "^JKSE",
+    "COMPOSITE": "^JKSE",
 }
 
 _TRADINGVIEW_SYMBOL_ALIASES: dict = {
@@ -128,6 +141,10 @@ _TRADINGVIEW_SYMBOL_ALIASES: dict = {
     "IX0001": "TWSE:IX0001",
     "TWSE:TAIEX": "TWSE:IX0001",
     "TWSE:IX0001": "TWSE:IX0001",
+    # Indonesian index aliases → TradingView format
+    "IHSG": "IDX:COMPOSITE",
+    "JCI": "IDX:COMPOSITE",
+    "^JKSE": "IDX:COMPOSITE",
     # Spot metals in forex-pair notation — unambiguous (no venue lists a stock or
     # token called "XAUUSD"/"XAGUSD"), so these always map to the TVC CFD feed.
     "XAUUSD": "TVC:GOLD",
