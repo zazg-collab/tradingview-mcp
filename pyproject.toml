@@ -24,6 +24,8 @@ dependencies = [
   # rebuild drift to 3.2.0 and break paid traffic. See futures_service._futures_query.
   "tradingview-screener==3.0.0",
   "tradingview-ta>=3.3.0",
+  "yfinance>=0.2.40",
+  "pandas>=1.5.0",
 ]
 
 [project.scripts]
