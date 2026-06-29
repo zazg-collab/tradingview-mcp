@@ -68,6 +68,9 @@ from tradingview_mcp.core.services.backtest_service import (
 from tradingview_mcp.core.services.idx_fundamental_service import screen_idx_fundamental
 from tradingview_mcp.core.services.idx_decision_service import get_idx_stock_decision
 from tradingview_mcp.core.services.idx_fibonacci_service import analyze_idx_fibonacci
+from tradingview_mcp.core.services.advanced_indicators_service import (
+    get_advanced_indicators_for_stock as _get_advanced_indicators,
+)
 from tradingview_mcp.core.services.idx_screener_service import (
     screen_idx_stocks,
     analyze_idx_index,
@@ -1651,6 +1654,38 @@ def get_stock_decision(
         get_stock_decision("ZATA")
     """
     return get_idx_stock_decision(ticker=ticker, timeframe=timeframe)
+
+
+@mcp.tool()
+def get_advanced_indicators(ticker: str, timeframe: str = "1D") -> dict:
+    """
+    Indikator teknikal lanjutan: ADX/DMI, CCI, Williams %R, StochRSI,
+    Stochastic Slow (10,5,5), Ichimoku Cloud, Volume Profile (POC/VAH/VAL).
+
+    Lebih lengkap dari get_stock_decision — khusus untuk analisis mendalam.
+    Ticker: kode saham IDX (BBCA, TLKM, dll). Timeframe: 1D (default), 1W, 4H.
+
+    Sumber data:
+      - tradingview_ta : ADX/DMI, CCI, Williams %R, StochRSI
+      - yfinance + pandas_ta : Stochastic Slow (10,5,5), Ichimoku Cloud, Volume Profile
+
+    Output:
+      - adx_dmi       : ADX, +DI, -DI, signal (BULL/BEAR/NEUTRAL), strength (STRONG/MODERATE/WEAK)
+      - cci           : CCI20 value + signal (OVERBOUGHT/OVERSOLD/NEUTRAL)
+      - williams_r    : W%R value + signal (range -100 to 0)
+      - stoch_rsi     : StochRSI K + signal
+      - stoch_slow    : Stochastic Slow K/D (10,5,5) + signal (includes BULLISH_CROSS)
+      - ichimoku      : Tenkan, Kijun, Span A/B, price_vs_cloud, signal
+      - volume_profile: POC, VAH, VAL (70% value area), price_vs_poc
+
+    Contoh:
+        get_advanced_indicators("BBCA")
+        get_advanced_indicators("TLKM", timeframe="1W")
+    """
+    return _get_advanced_indicators(
+        ticker=ticker.upper().strip(),
+        timeframe=sanitize_timeframe(timeframe, "1D"),
+    )
 
 
 # ── Resource ───────────────────────────────────────────────────────────────────
