@@ -1279,6 +1279,44 @@ def scan_cia_setups(
     )
 
 
+@mcp.tool()
+def scan_sector_rotation(
+    timeframe:      str   = "1D",
+    tight_pct:      float = 5.0,
+    min_volume_idr: float = 0.0,
+) -> dict:
+    """Scan kekuatan sektor IDX — tahu sektor mana yang sedang 'jalan' vs lemah.
+
+    Untuk setiap sektor, hitung:
+      - % saham di atas MA20 / MA50 / MA200
+      - Jumlah saham ketat, superketat, rainbow
+      - Health score = weighted average (MA20 50% + MA50 30% + MA200 20%)
+      - Strength label: 🔥 KUAT / 📈 MODERAT / 📉 LEMAH / ❄️ SANGAT LEMAH
+
+    Sektor diurutkan dari terkuat ke terlemah.
+
+    Args:
+        timeframe:      1D (default), 1W, 4H, 1H.
+        tight_pct:      Threshold % jarak MA untuk ketat/superketat. Default 5%.
+        min_volume_idr: Filter likuiditas dalam miliar IDR. Default 0 (no filter).
+
+    Example:
+        scan_sector_rotation()             # semua saham, daily
+        scan_sector_rotation("1W")         # weekly — trend lebih besar
+        scan_sector_rotation(min_volume_idr=0.5)  # saham ≥500jt IDR/hari saja
+    """
+    from tradingview_mcp.core.services.cia_scanner_service import (
+        scan_sector_rotation as _scan_sector,
+    )
+    timeframe = sanitize_timeframe(timeframe, "1D")
+    min_vol_raw = max(0.0, min_volume_idr) * 1_000_000_000
+    return _scan_sector(
+        timeframe=timeframe,
+        tight_pct=max(0.5, min(20.0, tight_pct)),
+        min_volume_idr=min_vol_raw,
+    )
+
+
 # ── Telegram Tools ─────────────────────────────────────────────────────────────
 
 @mcp.tool()

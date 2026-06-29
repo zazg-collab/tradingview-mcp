@@ -369,3 +369,151 @@ def scan_cia_setups(
         "summary"         : summary,
         "setups"          : result_setups,
     }
+
+
+def scan_sector_rotation(
+    timeframe:  str   = "1D",
+    tight_pct:  float = DEFAULT_TIGHT_PCT,
+    min_volume_idr: float = 0,
+) -> dict:
+    """
+    Scan sektor IDX: berapa % saham di atas MA20/50/200 dan berapa yg ketat/superketat.
+    Digunakan untuk tahu sektor mana yang sedang 'jalan' vs lemah.
+
+    Returns list sektor diurutkan dari terkuat (paling banyak above MA20) ke terlemah.
+    """
+    try:
+        from tradingview_screener import Query
+    except ImportError:
+        return {"error": "tradingview-screener tidak tersedia"}
+
+    suffix = _TF_TO_TV.get(timeframe, "1D")
+
+    def _c(name: str) -> str:
+        return f"{name}|{suffix}" if suffix != "1D" else name
+
+    cols = [
+        _c("close"), _c("volume"), _c("change"),
+        _c("SMA5"), _c("SMA10"), _c("SMA20"), _c("SMA50"), _c("SMA200"),
+        "sector", "name",
+    ]
+
+    try:
+        total, df = (Query()
+                     .set_markets("indonesia")
+                     .select(*cols)
+                     .limit(1000)
+                     .get_scanner_data())
+    except Exception as exc:
+        return {"error": f"Gagal fetch: {exc}"}
+
+    df.rename(columns=lambda c: c.split("|")[0] if isinstance(c, str) else c, inplace=True)
+
+    # Accumulate per sektor
+    from collections import defaultdict
+    sectors: dict = defaultdict(lambda: {
+        "total": 0, "above_ma20": 0, "above_ma50": 0, "above_ma200": 0,
+        "ketat": 0, "superketat": 0, "rainbow": 0,
+        "vol_idr_total": 0.0,
+    })
+
+    for _, row in df.iterrows():
+        close  = row.get("close") or 0
+        volume = row.get("volume") or 0
+        if not close or close <= 0:
+            continue
+
+        vol_idr = volume * close
+        if min_volume_idr > 0 and vol_idr < min_volume_idr:
+            continue
+
+        sector = str(row.get("sector") or "Lainnya").strip() or "Lainnya"
+        ma5    = row.get("SMA5")
+        ma10   = row.get("SMA10")
+        ma20   = row.get("SMA20")
+        ma50   = row.get("SMA50")
+        ma200  = row.get("SMA200")
+
+        s = sectors[sector]
+        s["total"] += 1
+        s["vol_idr_total"] += vol_idr / 1_000_000  # dalam juta IDR
+
+        above20  = ma20  and close > ma20
+        above50  = ma50  and close > ma50
+        above200 = ma200 and close > ma200
+
+        if above20:  s["above_ma20"]  += 1
+        if above50:  s["above_ma50"]  += 1
+        if above200: s["above_ma200"] += 1
+
+        # Ketat/Superketat
+        if ma5 and ma10 and ma20 and close > ma5 and close > ma10 and close > ma20:
+            d5  = (close - ma5)  / ma5  * 100
+            d10 = (close - ma10) / ma10 * 100
+            d20 = (close - ma20) / ma20 * 100
+            tight5  = 0 <= d5  <= tight_pct
+            tight10 = 0 <= d10 <= tight_pct
+            tight20 = 0 <= d20 <= tight_pct
+            if tight5 and tight10 and tight20:
+                s["superketat"] += 1
+                s["ketat"] += 1
+            elif tight5 or tight10 or tight20:
+                s["ketat"] += 1
+
+        # Rainbow
+        if (ma5 and ma10 and ma20 and ma50 and ma200 and
+                close > ma5 and close > ma10 and close > ma20 and
+                close > ma50 and close > ma200):
+            s["rainbow"] += 1
+
+    # Build output — sort by % above MA20 descending
+    result = []
+    for sector_name, s in sectors.items():
+        n = s["total"]
+        if n == 0:
+            continue
+        pct20  = round(s["above_ma20"]  / n * 100, 1)
+        pct50  = round(s["above_ma50"]  / n * 100, 1)
+        pct200 = round(s["above_ma200"] / n * 100, 1)
+
+        # Health score: weighted average
+        health = round(pct20 * 0.5 + pct50 * 0.3 + pct200 * 0.2, 1)
+
+        # Strength label
+        if health >= 60:
+            strength = "🔥 KUAT"
+        elif health >= 40:
+            strength = "📈 MODERAT"
+        elif health >= 20:
+            strength = "📉 LEMAH"
+        else:
+            strength = "❄️ SANGAT LEMAH"
+
+        result.append({
+            "sector"         : sector_name,
+            "strength"       : strength,
+            "health_score"   : health,
+            "total_stocks"   : n,
+            "above_ma20"     : s["above_ma20"],
+            "above_ma50"     : s["above_ma50"],
+            "above_ma200"    : s["above_ma200"],
+            "pct_above_ma20" : pct20,
+            "pct_above_ma50" : pct50,
+            "pct_above_ma200": pct200,
+            "ketat_count"    : s["ketat"],
+            "superketat_count": s["superketat"],
+            "rainbow_count"  : s["rainbow"],
+            "vol_idr_total_B": round(s["vol_idr_total"] / 1000, 2),  # miliar
+        })
+
+    result.sort(key=lambda x: x["health_score"], reverse=True)
+
+    return {
+        "scan_info": {
+            "timeframe"     : timeframe,
+            "tight_pct"     : tight_pct,
+            "total_sectors" : len(result),
+            "total_stocks"  : sum(s["total_stocks"] for s in result),
+        },
+        "sectors": result,
+    }

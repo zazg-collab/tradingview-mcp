@@ -657,6 +657,69 @@ def get_idx_stock_decision(ticker: str, timeframe: str = "1D") -> dict:
     # ── 8. Extended indicators ────────────────────────────────────────────────
     extended = extract_extended_indicators(ind)
 
+    # ── 8b. CIA Setup Detection ───────────────────────────────────────────────
+    cia_context: dict = {}
+    try:
+        from tradingview_mcp.core.services.cia_scanner_service import _classify, _pct
+
+        # SMA values sudah ada di ind (dari tradingview_ta)
+        _close  = ind.get("close") or 0
+        _ma5    = ind.get("SMA5")
+        _ma10   = ind.get("SMA10")
+        _ma20   = ind.get("SMA20")
+        _ma50   = ind.get("SMA50")
+        _ma100  = ind.get("SMA100")
+        _ma200  = ind.get("SMA200")
+        _vol    = ind.get("volume") or 0
+
+        # Ambil V60 dari tradingview_screener (satu field, ringan)
+        _avg_v60: Optional[float] = None
+        try:
+            from tradingview_screener import Query as _Q
+            _, _sdf = _Q().set_markets("indonesia").select(
+                "average_volume_60d_calc"
+            ).set_tickers(f"IDX:{clean}").get_scanner_data()
+            if not _sdf.empty:
+                _avg_v60 = _sdf.iloc[0].get("average_volume_60d_calc")
+        except Exception:
+            pass
+
+        if _close > 0:
+            _setups, _dist = _classify(
+                close=_close, ma5=_ma5, ma10=_ma10, ma20=_ma20,
+                ma50=_ma50, ma100=_ma100, ma200=_ma200,
+                volume=_vol, avg_vol=_avg_v60,
+                tight_pct=5.0, kame_ratio=2.5,
+            )
+
+            # MA distance summary (format mirip CIAbot)
+            _ma_info: dict = {}
+            for _label, _ma_val in [("ma5",_ma5),("ma10",_ma10),("ma20",_ma20),
+                                     ("ma50",_ma50),("ma100",_ma100),("ma200",_ma200)]:
+                if _ma_val:
+                    _d = _pct(_close, _ma_val)
+                    _above = "↑" if (_d is not None and _d >= 0) else "↓"
+                    _ma_info[_label] = {
+                        "value": round(_ma_val, 2),
+                        "pct_from_price": _d,
+                        "position": _above,
+                    }
+
+            cia_context = {
+                "setups"     : _setups,
+                "has_setup"  : len(_setups) > 0,
+                "ma_position": _ma_info,
+                "vol_ratio_v60": _dist.get("vol_ratio_v60"),
+                "note": (
+                    "STAR: setup premium terkuat (ketat+kamehameha). "
+                    "SUPERKETAT: semua MA rapat ≤5%, entry terbaik. "
+                    "KETAT: salah satu MA rapat, tren mulai. "
+                    "RAINBOW: di atas semua MA, no resistance."
+                ) if _setups else "Tidak ada CIA setup aktif saat ini.",
+            }
+    except Exception as _cia_err:
+        cia_context = {"error": str(_cia_err)}
+
     # ── 9. Assemble output ────────────────────────────────────────────────────
     output: dict = {
         "ticker"   : clean,
@@ -702,6 +765,9 @@ def get_idx_stock_decision(ticker: str, timeframe: str = "1D") -> dict:
 
         # Layer E: Bandarmology
         "bandarmology": bandar,
+
+        # Layer F: CIA Setup (Chronic Investor Academy)
+        "cia_setup": cia_context,
     }
 
     # Trade setup (hanya jika score cukup)
