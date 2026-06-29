@@ -77,6 +77,9 @@ from tradingview_mcp.core.services.signal_scan_service import (
     scan_by_signal as _scan_by_signal,
     AVAILABLE_SIGNALS,
 )
+from tradingview_mcp.core.services.cia_scanner_service import (
+    scan_cia_setups as _scan_cia_setups,
+)
 from tradingview_mcp.core.services.telegram_service import (
     telegram_read_messages as _tg_read,
     telegram_stock_sentiment as _tg_sentiment,
@@ -1198,6 +1201,81 @@ def scan_by_signal(
         timeframe=timeframe,
         index_filter=index_filter,
         limit=limit,
+    )
+
+
+# ── CIA Setup Scanner ──────────────────────────────────────────────────────────
+
+@mcp.tool()
+def scan_cia_setups(
+    setup_filter:     str   = "all",
+    min_volume_idr:   float = 0.0,
+    index_filter:     str   = "",
+    limit:            int   = 50,
+    timeframe:        str   = "1D",
+    tight_pct:        float = 5.0,
+    kamehameha_ratio: float = 2.5,
+    min_above_ma20:   bool  = True,
+) -> dict:
+    """Scan seluruh IDX (~866 saham) untuk CIA-specific setups.
+
+    Setup yang dideteksi:
+      STAR ⭐        = Ketat/Superketat + Kamehameha — setup premium terkuat
+      SUPERKETAT ⚡  = close > MA5/10/20 AND semua jarak ≤ tight_pct% (AND condition)
+                       titik entry terbaik, CL ketat di bawah semua MA
+      KETAT          = close > MA5/10/20 AND salah satu jarak ≤ tight_pct% (OR condition)
+                       konfirmasi tren mulai berjalan
+      KAMEHAMEHA 💥  = volume > kamehameha_ratio × avg_volume_10d
+                       ledakan volume — bisa terjadi TANPA setup MA
+      RAINBOW 🌈    = close > MA5/10/20/50/100/200 sekaligus, tidak ada resistance
+      ABOVE_MA20     = close > MA20 (syarat minimal saat IHSG bearish)
+
+    Args:
+        setup_filter:     Filter: "all", "superketat", "ketat", "kamehameha",
+                          "star", "rainbow", "above_ma20". Default "all".
+        min_volume_idr:   Minimum nilai transaksi harian dalam MILIAR IDR.
+                          Default 0 (no filter) — sama dengan CIAbot yang tidak filter
+                          volume sama sekali. Set nilai positif untuk filter likuiditas.
+        index_filter:     Filter ke index: LQ45, IDX30, IDX80, KOMPAS100, JII, dll.
+                          Kosong = scan semua IDX (~866 saham).
+        limit:            Maks hasil per kategori setup (max 100). Default 30.
+        timeframe:        1D (default), 1W, 4H, 1H, 15m.
+        tight_pct:        Threshold jarak % ke MA untuk "ketat". Default 5.0%.
+        kamehameha_ratio: Threshold volume vs V60 untuk kamehameha. Default 2.5x
+                          (sama dengan CIA original: volume > 2.5x rata-rata 60 hari).
+        min_above_ma20:   Jika True, hanya tampilkan saham di atas MA20.
+                          Default True (kondisi IHSG bearish sekarang).
+
+    Returns:
+        setups: dict berisi list saham per kategori CIA setup
+        summary: jumlah saham per setup
+        scan_info: parameter yang dipakai
+        total_scanned, total_with_setup
+
+    Example:
+        scan_cia_setups()                              # semua setup, minimal 500jt IDR/hari
+        scan_cia_setups("all", min_volume_idr=0)       # pure CIA, no vol filter (seperti CIAbot)
+        scan_cia_setups("star")                        # hanya STAR setup
+        scan_cia_setups("superketat", tight_pct=3.0)  # superketat sangat ketat ≤3%
+        scan_cia_setups("kamehameha", kamehameha_ratio=3.0)   # volume > 3x avg
+        scan_cia_setups("all", index_filter="LQ45")   # scan LQ45 saja
+        scan_cia_setups("all", min_above_ma20=False)  # termasuk saham di bawah MA20
+    """
+    timeframe = sanitize_timeframe(timeframe, "1D")
+    min_vol_raw = max(0.0, min_volume_idr) * 1_000_000_000  # konversi miliar ke IDR
+    tight_pct   = max(0.5, min(20.0, tight_pct))
+    kame_ratio  = max(1.1, min(10.0, kamehameha_ratio))
+    limit       = max(1, min(100, limit))
+
+    return _scan_cia_setups(
+        setup_filter      = setup_filter,
+        min_volume_idr    = min_vol_raw,
+        index_filter      = index_filter,
+        limit             = limit,
+        timeframe         = timeframe,
+        tight_pct         = tight_pct,
+        kamehameha_ratio  = kame_ratio,
+        min_above_ma20    = min_above_ma20,
     )
 
 
