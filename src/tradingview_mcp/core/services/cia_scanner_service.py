@@ -67,6 +67,9 @@ SETUP_KAMEHAMEHA  = "KAMEHAMEHA"
 SETUP_STAR        = "STAR"
 SETUP_RAINBOW     = "RAINBOW"
 SETUP_ABOVE_MA20  = "ABOVE_MA20"
+SETUP_BELOWALLMA  = "BELOWALLMA"
+SETUP_SUNFLOWER   = "SUNFLOWER"
+SETUP_EMPTY_ZONE  = "EMPTY_ZONE"
 
 
 def _pct(price: float, ma: Optional[float]) -> Optional[float]:
@@ -145,6 +148,16 @@ def _classify(
     if has_ma_setup and SETUP_KAMEHAMEHA in setups:
         setups.append(SETUP_STAR)
 
+    # ── BELOWALLMA: di bawah SEMUA MA (kebalikan RAINBOW) ────────────────────
+    below5   = d5   is not None and d5   < 0
+    below10  = d10  is not None and d10  < 0
+    below20  = d20  is not None and d20  < 0
+    below50  = d50  is not None and d50  < 0
+    below100 = d100 is not None and d100 < 0
+    below200 = d200 is not None and d200 < 0
+    if below5 and below10 and below20 and below50 and below100 and below200:
+        setups.append(SETUP_BELOWALLMA)
+
     # ── MA distance summary ───────────────────────────────────────────────────
     ma_dist = {}
     if d5   is not None: ma_dist["ma5_pct"]   = d5
@@ -156,6 +169,110 @@ def _classify(
     if vol_ratio is not None: ma_dist["vol_ratio_v60"] = vol_ratio
 
     return setups, ma_dist
+
+
+def _check_historical_setups(
+    ticker:    str,
+    tight_pct: float,
+    ara_pct:   float = 10.0,   # threshold % naik untuk dianggap "big move/ARA"
+    lookback:  int   = 20,     # hari histori untuk SMA & pattern check
+) -> List[str]:
+    """
+    Cek SUNFLOWER dan EMPTY_ZONE menggunakan history OHLCV (via yfinance).
+    Hanya dipanggil untuk saham yang sudah di-identify sebagai ketat/superketat.
+
+    SUNFLOWER 🌻 = ketat hari ini, tapi hari sebelumnya TIDAK ketat
+                   (first ketat signal setelah jeda)
+
+    EMPTY_ZONE ⬛ = volume flat hari ini (<50% V20-avg), tapi 3 hari sebelumnya
+                   ada bar naik >ara_pct% (ARA atau big move)
+                   → distribusi terselubung, jebakan retailer
+    """
+    try:
+        import yfinance as yf
+        import pandas as pd
+
+        hist = yf.download(
+            f"{ticker}.JK",
+            period=f"{lookback + 5}d",
+            interval="1d",
+            progress=False,
+            auto_adjust=True,
+        )
+        if hist is None or len(hist) < 6:
+            return []
+
+        hist = hist.tail(lookback)
+        c = hist["Close"].squeeze()
+        v = hist["Volume"].squeeze()
+
+        # Rolling SMAs dari data historis
+        sma5  = c.rolling(5,  min_periods=3).mean()
+        sma10 = c.rolling(10, min_periods=5).mean()
+        sma20 = c.rolling(20, min_periods=10).mean()
+
+        def _is_ketat_row(i: int) -> bool:
+            """Cek apakah bar ke-i ketat."""
+            try:
+                close_i = float(c.iloc[i])
+                m5  = float(sma5.iloc[i])
+                m10 = float(sma10.iloc[i])
+                m20 = float(sma20.iloc[i])
+            except Exception:
+                return False
+            if any(v != v for v in [close_i, m5, m10, m20]):  # NaN check
+                return False
+            if not (close_i > m5 and close_i > m10 and close_i > m20):
+                return False
+            d5  = (close_i - m5)  / m5  * 100
+            d10 = (close_i - m10) / m10 * 100
+            d20 = (close_i - m20) / m20 * 100
+            return d5 <= tight_pct or d10 <= tight_pct or d20 <= tight_pct
+
+        n = len(hist)
+        found: List[str] = []
+
+        # ── SUNFLOWER ─────────────────────────────────────────────────────────
+        today_ketat    = _is_ketat_row(n - 1)
+        yest_ketat     = _is_ketat_row(n - 2) if n >= 2 else False
+
+        if today_ketat and not yest_ketat:
+            # Hitung berapa hari berturut-turut TIDAK ketat sebelum hari ini
+            days_gap = 0
+            for j in range(n - 2, -1, -1):
+                if _is_ketat_row(j):
+                    break
+                days_gap += 1
+            if days_gap >= 1:
+                found.append(f"SUNFLOWER (ketat pertama setelah {days_gap}h gap)")
+
+        # ── EMPTY ZONE ────────────────────────────────────────────────────────
+        # Ada big move (>ara_pct) dalam 3 bar sebelumnya?
+        big_move_days_ago = None
+        for j in range(1, min(4, n)):           # cek 3 bar ke belakang
+            try:
+                prev_c = float(c.iloc[n - j - 1])
+                curr_c = float(c.iloc[n - j])
+                if prev_c > 0 and (curr_c - prev_c) / prev_c * 100 >= ara_pct:
+                    big_move_days_ago = j
+                    break
+            except Exception:
+                pass
+
+        if big_move_days_ago is not None:
+            # Volume hari ini vs avg20
+            v20_avg = float(v.tail(20).mean())
+            v_today = float(v.iloc[-1])
+            if v20_avg > 0 and v_today < v20_avg * 0.5:
+                found.append(
+                    f"EMPTY_ZONE (vol={round(v_today/v20_avg*100)}% avg, "
+                    f"big move {big_move_days_ago}h lalu)"
+                )
+
+        return found
+
+    except Exception:
+        return []
 
 
 def scan_cia_setups(
@@ -254,6 +371,9 @@ def scan_cia_setups(
         SETUP_KAMEHAMEHA : [],
         SETUP_RAINBOW    : [],
         SETUP_ABOVE_MA20 : [],
+        SETUP_BELOWALLMA : [],
+        SETUP_SUNFLOWER  : [],
+        SETUP_EMPTY_ZONE : [],
     }
 
     total_with_setup = 0
@@ -314,13 +434,28 @@ def scan_cia_setups(
         # Masukkan ke bucket yang relevan
         placed = False
         for s in [SETUP_STAR, SETUP_SUPERKETAT, SETUP_KETAT,
-                  SETUP_KAMEHAMEHA, SETUP_RAINBOW, SETUP_ABOVE_MA20]:
+                  SETUP_KAMEHAMEHA, SETUP_RAINBOW, SETUP_ABOVE_MA20,
+                  SETUP_BELOWALLMA]:
             if s in setups:
                 buckets[s].append(entry)
                 placed = True
 
         if placed:
             total_with_setup += 1
+
+    # ── Post-process: SUNFLOWER + EMPTY_ZONE via historical check ────────────
+    # Hanya untuk kandidat ketat/superketat (bukan semua 866 saham)
+    _hist_candidates = buckets[SETUP_SUPERKETAT] + buckets[SETUP_KETAT]
+    for entry in _hist_candidates:
+        _ticker = entry["ticker"]
+        hist_setups = _check_historical_setups(_ticker, tight_pct=tight_pct)
+        if hist_setups:
+            entry["setups"] = entry["setups"] + hist_setups
+            for hs in hist_setups:
+                if hs.startswith("SUNFLOWER"):
+                    buckets[SETUP_SUNFLOWER].append(entry)
+                elif hs.startswith("EMPTY_ZONE"):
+                    buckets[SETUP_EMPTY_ZONE].append(entry)
 
     # ── Filter by setup_filter ────────────────────────────────────────────────
     _filter_map = {
@@ -331,13 +466,16 @@ def scan_cia_setups(
         "star"       : [SETUP_STAR],
         "rainbow"    : [SETUP_RAINBOW],
         "above_ma20" : [SETUP_ABOVE_MA20],
+        "belowallma" : [SETUP_BELOWALLMA],
+        "sunflower"  : [SETUP_SUNFLOWER],
+        "empty_zone" : [SETUP_EMPTY_ZONE],
     }
     active_setups = _filter_map.get(setup_filter, list(buckets.keys()))
 
     # Sort each bucket: STAR/superketat by tightest MA, kamehameha by vol_ratio
     def _sort_key(entry: dict, stype: str) -> float:
         if stype in (SETUP_KAMEHAMEHA,):
-            return -(entry.get("vol_ratio_vs_avg10d") or 0)
+            return -(entry.get("vol_ratio_v60") or 0)
         # For MA setups: sort by minimum MA distance (tightest = best entry)
         dists = [
             v for k, v in entry.items()
