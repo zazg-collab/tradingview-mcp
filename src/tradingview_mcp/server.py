@@ -71,6 +71,24 @@ from tradingview_mcp.core.services.idx_fibonacci_service import analyze_idx_fibo
 from tradingview_mcp.core.services.idx_screener_service import (
     screen_idx_stocks,
     analyze_idx_index,
+    get_idx_top_gainers,
+)
+from tradingview_mcp.core.services.signal_scan_service import (
+    scan_by_signal as _scan_by_signal,
+    AVAILABLE_SIGNALS,
+)
+from tradingview_mcp.core.services.telegram_service import (
+    telegram_read_messages as _tg_read,
+    telegram_stock_sentiment as _tg_sentiment,
+    telegram_list_chats as _tg_list_chats,
+    telegram_list_folders as _tg_list_folders,
+    telegram_read_folder as _tg_read_folder,
+    telegram_query_knowledge as _tg_query_kb,
+    telegram_knowledge_stats as _tg_kb_stats,
+)
+from tradingview_mcp.core.services.vector_service import (
+    semantic_search as _vec_search,
+    vector_stats as _vec_stats,
 )
 from tradingview_mcp.core.utils.validators import (
     sanitize_timeframe,
@@ -550,13 +568,59 @@ def multi_timeframe_analysis(symbol: str, exchange: str = "KUCOIN") -> dict:
 
 @mcp.tool()
 def market_sentiment(symbol: str, category: str = "all", limit: int = 20) -> dict:
-    """Real-time Reddit sentiment analysis for stocks and crypto.
+    """Real-time sentiment analysis for stocks and crypto.
+
+    For IDX/Indonesian stocks (category="indonesia"), uses Telegram CIA groups as primary source.
+    For US stocks and crypto, uses Reddit.
 
     Args:
-        symbol: Asset symbol ("AAPL", "BTC", "ETH", "TSLA")
-        category: Subreddit group to search ("crypto", "stocks", "all")
-        limit: Number of posts to analyse
+        symbol:   Asset symbol ("AAPL", "BTC", "ETH", "TSLA", "BBCA", "GOTO")
+        category: "crypto" | "stocks" | "all" | "indonesia" (IDX → Telegram sentiment)
+        limit:    Number of posts/messages to analyse
     """
+    if category == "indonesia":
+        # Try local knowledge base first (fast, no network)
+        tg_kb = _tg_query_kb(ticker=symbol, days_back=7, limit=limit)
+        if tg_kb.get("count", 0) > 0:
+            ss   = tg_kb.get("sentiment_summary", {})
+            msgs = tg_kb.get("messages", [])
+            newest_date = msgs[0]["date"][:10]  if msgs else "?"
+            oldest_date = msgs[-1]["date"][:10] if msgs else "?"
+            return {
+                "success":         True,
+                "symbol":          symbol,
+                "source":          "Telegram CIA groups (knowledge base)",
+                "posts_analyzed":  tg_kb["count"],
+                "sentiment_label": ss.get("overall", "Neutral"),
+                "sentiment_score": round((ss.get("bull_pct", 0) - ss.get("bear_pct", 0)) / 100, 3),
+                "data_from":       oldest_date,
+                "data_to":         newest_date,
+                "days_back":       7,
+                "details":         tg_kb,
+            }
+        # Fallback: live fetch dari CIA saham folder
+        tg_live = _tg_read_folder(
+            "CIA saham", ticker_filter=symbol, hours_back=168,
+            limit_per_chat=limit, save_to_db=True
+        )
+        if tg_live.get("success"):
+            cs    = tg_live.get("combined_sentiment", {})
+            total = cs.get("total", 1) or 1
+            live_msgs   = tg_live.get("messages", [])
+            newest_date = live_msgs[0]["date"][:10]  if live_msgs else "?"
+            oldest_date = live_msgs[-1]["date"][:10] if live_msgs else "?"
+            return {
+                "success":         True,
+                "symbol":          symbol,
+                "source":          "Telegram CIA saham (live)",
+                "posts_analyzed":  total,
+                "sentiment_label": cs.get("label", "Neutral"),
+                "sentiment_score": round((cs.get("bullish", 0) - cs.get("bearish", 0)) / total, 3),
+                "data_from":       oldest_date,
+                "data_to":         newest_date,
+                "details":         tg_live,
+            }
+        return {"success": False, "symbol": symbol, "error": "Tidak ada data Telegram untuk ticker ini"}
     return analyze_sentiment(symbol, category, limit)
 
 
@@ -568,8 +632,8 @@ def financial_news(symbol: str = None, category: str = "stocks", limit: int = 10
         symbol: Optional ticker filter. For IDX stocks use ticker only e.g. "BBCA", "TPIA".
                 For US stocks: "AAPL", "TSLA". None = all news from category.
         category: Feed category:
-                  - "indonesia" → IDX/BEI news: Kontan, Bisnis.com, CNBC Indonesia,
-                    IDX Channel, Katadata, Emiten News, Pasar Modal Inilah, Stockbit News, IDX Official
+                  - "indonesia" → IDX/BEI news: Kontan, CNBC Indonesia, IDX Channel,
+                    Katadata, Emiten News, Detik Finance, Bisnis.com (scraper)
                   - "stocks"    → Global: Yahoo Finance, MarketWatch, CNBC
                   - "crypto"    → CoinDesk, CoinTelegraph
                   - "all"       → Global stocks + crypto combined
@@ -580,40 +644,111 @@ def financial_news(symbol: str = None, category: str = "stocks", limit: int = 10
 
 @mcp.tool()
 def combined_analysis(symbol: str, exchange: str = "NASDAQ", timeframe: str = "1D") -> dict:
-    """POWER TOOL: TradingView technical analysis + Reddit sentiment + Financial news.
+    """POWER TOOL: TradingView technical analysis + Telegram sentiment (IDX) / Reddit sentiment (global) + Financial news.
+
+    For IDX/BEI stocks, sentiment is sourced from Telegram CIA groups (knowledge base or live fetch).
+    For US stocks and crypto, sentiment is sourced from Reddit.
 
     Args:
-        symbol: Asset symbol ("AAPL", "BTCUSDT", "THYAO", "GDX")
-        exchange: Exchange (NASDAQ, NYSE, AMEX, NYSEARCA, PCX, BINANCE, KUCOIN, MEXC, BIST, EGX, TWSE, TPEX)
+        symbol:   Asset symbol ("AAPL", "BTCUSDT", "THYAO", "GDX", "BBCA", "GOTO")
+        exchange: Exchange (NASDAQ, NYSE, AMEX, NYSEARCA, PCX, BINANCE, KUCOIN, MEXC, BIST, EGX, IDX, TWSE, TPEX)
         timeframe: Analysis timeframe (5m, 15m, 1h, 4h, 1D, 1W)
     """
     tech = coin_analysis(symbol, exchange, timeframe)
-    cat = "crypto" if exchange.upper() in ["BINANCE", "KUCOIN", "BYBIT", "MEXC"] else "stocks"
-    sentiment = analyze_sentiment(symbol, category=cat)
+    _exc = exchange.upper()
+
+    if _exc in ["BINANCE", "KUCOIN", "BYBIT", "MEXC"]:
+        cat = "crypto"
+        use_telegram = False
+    elif _exc in ["IDX", "BEI", "IDX:*"]:
+        cat = "indonesia"
+        use_telegram = True
+    else:
+        cat = "stocks"
+        use_telegram = False
+
     news = fetch_news_summary(symbol, category=cat, limit=5)
 
+    # ── Sentiment source routing ──────────────────────────────────────────────
+    if use_telegram:
+        # 1. Try local knowledge base first (cepat, no network)
+        tg_kb = _tg_query_kb(ticker=symbol, days_back=7)
+        if tg_kb.get("count", 0) > 0:
+            ss    = tg_kb.get("sentiment_summary", {})
+            bull_pct = ss.get("bull_pct", 0)
+            bear_pct = ss.get("bear_pct", 0)
+            msgs  = tg_kb.get("messages", [])
+            # Extract date range from messages (sorted DESC by date)
+            newest_date = msgs[0]["date"][:10]  if msgs else "?"
+            oldest_date = msgs[-1]["date"][:10] if msgs else "?"
+            sentiment = {
+                "sentiment_score":  round((bull_pct - bear_pct) / 100, 3),
+                "sentiment_label":  ss.get("overall", "Neutral"),
+                "posts_analyzed":   tg_kb["count"],
+                "source":           "Telegram CIA (knowledge base)",
+                "data_from":        oldest_date,
+                "data_to":          newest_date,
+                "days_back":        7,
+            }
+        else:
+            # 2. Live fetch dari CIA saham folder
+            tg_live = _tg_read_folder(
+                "CIA saham", ticker_filter=symbol,
+                hours_back=168, limit_per_chat=50, save_to_db=True
+            )
+            if tg_live.get("success") and tg_live.get("total_messages", 0) > 0:
+                cs    = tg_live.get("combined_sentiment", {})
+                total = cs.get("total", 1) or 1
+                live_msgs = tg_live.get("messages", [])
+                newest_date = live_msgs[0]["date"][:10]  if live_msgs else "?"
+                oldest_date = live_msgs[-1]["date"][:10] if live_msgs else "?"
+                sentiment = {
+                    "sentiment_score":  round((cs.get("bullish", 0) - cs.get("bearish", 0)) / total, 3),
+                    "sentiment_label":  cs.get("label", "Neutral"),
+                    "posts_analyzed":   total,
+                    "source":           "Telegram CIA saham (live)",
+                    "data_from":        oldest_date,
+                    "data_to":          newest_date,
+                    "days_back":        7,
+                }
+            else:
+                sentiment = {
+                    "sentiment_score": 0,
+                    "sentiment_label": "No Data",
+                    "posts_analyzed":  0,
+                    "source":          "Telegram (tidak ada data untuk ticker ini)",
+                    "data_from":       None,
+                    "data_to":         None,
+                }
+    else:
+        sentiment = analyze_sentiment(symbol, category=cat)
+        sentiment["source"] = "Reddit"
+
+    # ── Confluence ────────────────────────────────────────────────────────────
     tech_momentum = tech.get("market_sentiment", {}).get("momentum", "") if isinstance(tech, dict) else ""
-    tech_bullish = tech_momentum == "Bullish"
-    sent_bullish = sentiment.get("sentiment_score", 0) > 0.1
+    tech_bullish  = tech_momentum == "Bullish"
+    sent_bullish  = sentiment.get("sentiment_score", 0) > 0.1
     signals_agree = tech_bullish == sent_bullish
-    confidence = "HIGH" if signals_agree else "MIXED"
-    tech_signal = tech.get("market_sentiment", {}).get("buy_sell_signal", "N/A") if isinstance(tech, dict) else "N/A"
+    confidence    = "HIGH" if signals_agree else "MIXED"
+    tech_signal   = tech.get("market_sentiment", {}).get("buy_sell_signal", "N/A") if isinstance(tech, dict) else "N/A"
+    src           = sentiment.get("source", "sentiment")
 
     return {
-        "symbol": symbol,
-        "exchange": exchange,
+        "symbol":    symbol,
+        "exchange":  exchange,
         "timeframe": timeframe,
         "technical": tech,
         "sentiment": sentiment,
-        "news": {"count": news.get("count", 0), "latest": news.get("items", [])[:3]},
+        "news":      {"count": news.get("count", 0), "latest": news.get("items", [])[:3]},
         "confluence": {
             "signals_agree": signals_agree,
-            "confidence": confidence,
+            "confidence":    confidence,
             "recommendation": (
                 f"Technical {tech_signal} "
                 f"{'confirmed by' if signals_agree else 'conflicts with'} "
-                f"{sentiment.get('sentiment_label', 'Neutral')} Reddit sentiment "
-                f"({sentiment.get('posts_analyzed', 0)} posts analyzed)"
+                f"{sentiment.get('sentiment_label', 'Neutral')} {src} sentiment "
+                f"({sentiment.get('posts_analyzed', 0)} messages, "
+                f"data {sentiment.get('data_from', '?')} → {sentiment.get('data_to', '?')})"
             ),
         },
     }
@@ -958,6 +1093,50 @@ def idx_stock_screener(
 
 
 @mcp.tool()
+def idx_top_gainers_losers(
+    mode:           str   = "gainers",
+    timeframe:      str   = "1D",
+    limit:          int   = 30,
+    min_change_pct: float = 0.0,
+    min_volume_idr: float = 0.0,
+    index_filter:   str   = "",
+) -> dict:
+    """Top gainers atau losers seluruh IDX berdasarkan % perubahan harga.
+
+    Scan ~800 saham IDX (atau index tertentu), filter, dan sort by % change.
+    Lebih cepat dari idx_stock_screener karena tidak melakukan scoring.
+    Cocok untuk mencari saham yang ARA/bergerak kuat hari ini.
+
+    Args:
+        mode:           "gainers" (naik terbesar) | "losers" (turun terbesar)
+        timeframe:      Interval — 1D (default), 4H, 1H, 1W
+        limit:          Jumlah hasil (max 100, default 30)
+        min_change_pct: Filter minimum % change (mis: 2.0 = hanya ≥2% naik)
+        min_volume_idr: Filter minimum nilai transaksi jutaan IDR/hari
+                        (mis: 500 = min 500 juta IDR; 0 = tidak difilter)
+        index_filter:   Batasi ke index — LQ45, IDX30, IDX80, KOMPAS100,
+                        JII, IDXHIDIV20, IDXBUMN20 (kosong = semua IDX)
+
+    Returns:
+        dict dengan results berisi: ticker, price, change_pct, volume_idr (juta),
+        rsi, ma_pos (posisi vs EMA20/50/200), sector
+    """
+    timeframe      = sanitize_timeframe(timeframe, "1D")
+    limit          = max(1, min(100, limit))
+    min_change_pct = max(0.0, min_change_pct)
+    min_vol_idr    = min_volume_idr * 1_000_000  # convert dari juta IDR ke raw IDR
+    mode           = mode.lower() if mode.lower() in ("gainers", "losers") else "gainers"
+    return get_idx_top_gainers(
+        timeframe      = timeframe,
+        limit          = limit,
+        min_change_pct = min_change_pct,
+        min_volume_idr = min_vol_idr,
+        mode           = mode,
+        index_filter   = index_filter,
+    )
+
+
+@mcp.tool()
 def idx_index_analysis(
     index:     str = "LQ45",
     timeframe: str = "1D",
@@ -978,6 +1157,252 @@ def idx_index_analysis(
     timeframe = sanitize_timeframe(timeframe, "1D")
     limit     = max(1, min(100, limit))
     return analyze_idx_index(index.strip().upper(), timeframe, limit)
+
+
+@mcp.tool()
+def scan_by_signal(
+    signal:        str = "golden_cross",
+    timeframe:     str = "1D",
+    index_filter:  str = "",
+    limit:         int = 20,
+) -> dict:
+    """Scan saham IDX berdasarkan sinyal teknikal spesifik.
+
+    Sinyal tersedia:
+      Trend/EMA : golden_cross, death_cross, ema_stack_bullish, ema_stack_bearish,
+                  above_ema20, below_ema20
+      Momentum  : rsi_oversold (<35), rsi_overbought (>70), rsi_neutral (40-60),
+                  macd_bullish, macd_bearish
+      Volatility: bollinger_squeeze (BB width <10%, breakout incoming)
+      Volume    : volume_spike (>2x rata-rata)
+      Levels    : near_resistance, near_support (dalam 2% pivot)
+      Rating    : tv_buy, tv_strong_buy, tv_sell
+
+    Args:
+        signal:       Nama sinyal (contoh: "golden_cross", "rsi_oversold")
+        timeframe:    Timeframe — 1D (default), 1W, 4H, 1H, 15m
+        index_filter: Filter ke index tertentu — LQ45, IDX30, IDX80, KOMPAS100,
+                      JII, IDXHIDIV20, IDXBUMN20. Kosong = scan semua IDX.
+        limit:        Maks hasil (default 20, max 50)
+
+    Example:
+        scan_by_signal("golden_cross", index_filter="LQ45")
+        scan_by_signal("rsi_oversold", timeframe="1D")
+        scan_by_signal("bollinger_squeeze", index_filter="IDX80")
+        scan_by_signal("volume_spike")
+    """
+    timeframe = sanitize_timeframe(timeframe, "1D")
+    limit     = max(1, min(50, limit))
+    return _scan_by_signal(
+        signal=signal,
+        timeframe=timeframe,
+        index_filter=index_filter,
+        limit=limit,
+    )
+
+
+# ── Telegram Tools ─────────────────────────────────────────────────────────────
+
+@mcp.tool()
+def telegram_list_chats(limit: int = 30) -> dict:
+    """List semua grup/channel Telegram yang kamu ikuti — termasuk grup private.
+
+    Berguna untuk menemukan 'identifier' (username atau ID numerik) dari tiap chat,
+    yang dipakai sebagai parameter di telegram_read_messages dan telegram_stock_sentiment.
+
+    Requires: session file (~/.mcp_atila_telegram.session) dari telegram_auth.py
+
+    Args:
+        limit: Jumlah chat yang ditampilkan (default 30)
+    """
+    return _tg_list_chats(limit=max(1, min(100, limit)))
+
+
+@mcp.tool()
+def telegram_read_messages(
+    chat:       str,
+    limit:      int = 50,
+    keyword:    Optional[str] = None,
+    hours_back: int = 24,
+) -> dict:
+    """Baca pesan terbaru dari grup/channel Telegram (termasuk grup private).
+
+    Menggunakan akun Telegram kamu langsung (MTProto), bukan bot,
+    sehingga bisa membaca semua grup/channel yang sudah kamu ikuti.
+
+    Args:
+        chat:       Username (@namachat) atau ID numerik grup/channel
+        limit:      Jumlah pesan max (default 50)
+        keyword:    Filter hanya pesan yang mengandung kata ini (optional)
+        hours_back: Baca pesan N jam terakhir (default 24)
+
+    Example:
+        telegram_read_messages("@sahamindo", keyword="BBCA", hours_back=48)
+        telegram_read_messages("-1001234567890", limit=100)
+    """
+    return _tg_read(chat=chat, limit=max(1, min(200, limit)),
+                    keyword=keyword, hours_back=max(1, hours_back))
+
+
+@mcp.tool()
+def telegram_stock_sentiment(
+    ticker:         str,
+    chats:          list,
+    hours_back:     int = 48,
+    limit_per_chat: int = 100,
+) -> dict:
+    """Scan sentimen saham IDX dari beberapa grup Telegram sekaligus.
+
+    Mencari semua pesan yang menyebut ticker, lalu menganalisis sentimen
+    (bullish/bearish) berdasarkan kata kunci bahasa Indonesia + Inggris.
+
+    Args:
+        ticker:         Kode saham IDX (contoh: "BBCA", "GOTO", "TLKM")
+        chats:          List identifier grup/channel (username atau ID numerik)
+        hours_back:     Rentang waktu dalam jam (default 48)
+        limit_per_chat: Max pesan per chat (default 100)
+
+    Example:
+        telegram_stock_sentiment("BBCA", ["@sahamindo", "@forumidx", "-1001234567"])
+        telegram_stock_sentiment("GOTO", ["@investasiidx"], hours_back=72)
+    """
+    if not isinstance(chats, list) or len(chats) == 0:
+        return {"success": False, "error": "Parameter 'chats' harus berupa list minimal 1 chat"}
+    return _tg_sentiment(
+        ticker=ticker,
+        chats=chats,
+        hours_back=max(1, hours_back),
+        limit_per_chat=max(10, min(500, limit_per_chat)),
+    )
+
+
+@mcp.tool()
+def telegram_list_folders() -> dict:
+    """List semua folder Telegram yang sudah dibuat — untuk cari nama folder yang bisa dipakai di telegram_read_folder."""
+    return _tg_list_folders()
+
+
+@mcp.tool()
+def telegram_read_folder(
+    folder_name:    str,
+    limit_per_chat: int = 50,
+    hours_back:     int = 24,
+    ticker_filter:  Optional[str] = None,
+    save_to_db:     bool = True,
+) -> dict:
+    """Baca semua grup dalam satu folder Telegram sekaligus — sentimen, top ticker, dan simpan ke knowledge base.
+
+    Args:
+        folder_name:    Nama folder Telegram (substring). Contoh: "CIA Member", "CIA saham", "CIA"
+        limit_per_chat: Max pesan per grup (default 50, max 200)
+        hours_back:     Baca pesan N jam terakhir (default 24)
+        ticker_filter:  Filter hanya pesan yang menyebut saham ini (optional, contoh: "BBCA")
+        save_to_db:     Simpan semua pesan ke knowledge base lokal (default True)
+
+    Examples:
+        telegram_read_folder("CIA Member")
+        telegram_read_folder("CIA saham", ticker_filter="GOTO", hours_back=48)
+        telegram_read_folder("CIA", hours_back=72, limit_per_chat=100)
+    """
+    return _tg_read_folder(
+        folder_name=folder_name,
+        limit_per_chat=max(10, min(200, limit_per_chat)),
+        hours_back=max(1, hours_back),
+        ticker_filter=ticker_filter,
+        save_to_db=bool(save_to_db),
+    )
+
+
+@mcp.tool()
+def telegram_query_knowledge(
+    ticker:    Optional[str] = None,
+    group:     Optional[str] = None,
+    keyword:   Optional[str] = None,
+    days_back: int = 7,
+    limit:     int = 30,
+) -> dict:
+    """Query knowledge base Telegram lokal — sentimen forum saham IDX dari grup yang sudah dibaca.
+
+    Pesan dari grup Telegram (text, PDF, gambar) disimpan otomatis ke database lokal
+    setiap kali telegram_read_messages dijalankan. Tool ini query database tanpa perlu
+    koneksi Telegram aktif.
+
+    Args:
+        ticker:    Filter pesan yang menyebut saham ini (contoh: "BBCA", "GOTO")
+        group:     Filter berdasarkan nama grup (substring)
+        keyword:   Cari kata kunci dalam teks (contoh: "rights issue", "dividen", "bandar")
+        days_back: Rentang hari ke belakang (default 7)
+        limit:     Maks hasil (default 30)
+
+    Examples:
+        telegram_query_knowledge(ticker="BBCA") → semua diskusi BBCA dari forum
+        telegram_query_knowledge(keyword="bandar", days_back=3)
+        telegram_query_knowledge(ticker="GOTO", group="saham")
+    """
+    return _tg_query_kb(ticker=ticker, group=group, keyword=keyword,
+                        days_back=days_back, limit=limit)
+
+
+@mcp.tool()
+def telegram_knowledge_stats() -> dict:
+    """Statistik knowledge base Telegram — berapa pesan tersimpan, dari grup apa, ticker apa yang paling banyak disebut.
+
+    Berguna untuk melihat coverage knowledge base sebelum query sentimen.
+    Tidak perlu koneksi Telegram aktif.
+    """
+    return _tg_kb_stats()
+
+
+@mcp.tool()
+def telegram_semantic_search(
+    query: str,
+    n_results: int = 10,
+    group_filter: str = None,
+    sentiment_filter: str = None,
+    days_back: int = 30,
+) -> dict:
+    """Cari pesan Telegram CIA secara semantik — temukan diskusi yang relevan meski kata-katanya beda.
+
+    Berbeda dengan telegram_query_knowledge (exact keyword match), tool ini memahami makna/konteks.
+
+    Contoh penggunaan:
+        telegram_semantic_search("saham petrochemical prospek bagus")
+        → temukan diskusi TPIA, BRPT meski tidak menyebut kata "petrochemical" persis
+
+        telegram_semantic_search("bandar akumulasi diam-diam")
+        → temukan pesan tentang accumulation patterns
+
+        telegram_semantic_search("sektor perbankan outlook positif", sentiment_filter="bullish")
+        → hanya pesan bullish tentang perbankan
+
+        telegram_semantic_search("rights issue dilusi saham", days_back=7)
+        → diskusi rights issue seminggu terakhir
+
+    Args:
+        query:            Pertanyaan atau topik bebas (Indonesia/Inggris)
+        n_results:        Jumlah hasil yang dikembalikan (default 10)
+        group_filter:     Filter nama grup CIA (substring, opsional). Contoh: "Diary", "Alert"
+        sentiment_filter: Filter sentimen: "bullish", "bearish", atau "neutral" (opsional)
+        days_back:        Cari dalam N hari terakhir (default 30, 0 = semua waktu)
+
+    Requires: sentence-transformers + chromadb terinstall di venv
+    """
+    return _vec_search(
+        query=query,
+        n_results=n_results,
+        group_filter=group_filter,
+        sentiment_filter=sentiment_filter,
+        days_back=days_back,
+    )
+
+
+@mcp.tool()
+def telegram_vector_stats() -> dict:
+    """Status vector store untuk semantic search — berapa vektor tersimpan, model yang dipakai.
+
+    Gunakan ini untuk cek apakah semantic search sudah aktif dan siap dipakai.
+    """
+    return _vec_stats()
 
 
 # ── IDX Fundamental Screener ───────────────────────────────────────────────────

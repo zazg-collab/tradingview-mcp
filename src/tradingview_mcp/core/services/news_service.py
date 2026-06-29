@@ -23,6 +23,143 @@ import urllib.request
 from datetime import datetime, timezone
 from typing import Optional
 
+# ─── IDX Ticker → Company Name Aliases ───────────────────────────────────────
+# Maps ticker code to list of name variants used in Indonesian news articles.
+# News sites use company names, not ticker codes.
+IDX_TICKER_ALIASES: dict[str, list[str]] = {
+    "BBCA": ["BCA", "Bank BCA", "Bank Central Asia"],
+    "BBRI": ["BRI", "Bank BRI", "Bank Rakyat Indonesia"],
+    "BMRI": ["Bank Mandiri", "Mandiri"],
+    "BBNI": ["BNI", "Bank BNI", "Bank Negara Indonesia"],
+    "TLKM": ["Telkom", "Telekomunikasi Indonesia"],
+    "ASII": ["Astra", "Astra International"],
+    "UNVR": ["Unilever", "Unilever Indonesia"],
+    "HMSP": ["HM Sampoerna", "Sampoerna"],
+    "ICBP": ["Indofood CBP", "ICBP"],
+    "INDF": ["Indofood", "Indofood Sukses Makmur"],
+    "KLBF": ["Kalbe", "Kalbe Farma"],
+    "UNTR": ["United Tractors"],
+    "PGAS": ["PGN", "Perusahaan Gas Negara"],
+    "PTBA": ["Bukit Asam", "PTBA"],
+    "ADRO": ["Adaro", "Adaro Energy"],
+    "ITMG": ["Indo Tambangraya", "ITMG"],
+    "INCO": ["Vale Indonesia", "INCO"],
+    "ANTM": ["Antam", "Aneka Tambang"],
+    "MDKA": ["Merdeka Copper Gold", "MDKA"],
+    "MBMA": ["Merdeka Battery", "MBMA"],
+    "INKP": ["Indah Kiat", "Indah Kiat Pulp"],
+    "TKIM": ["Pindo Deli", "Tjiwi Kimia"],
+    "CTRA": ["Ciputra", "Ciputra Development"],
+    "BSDE": ["BSD", "Bumi Serpong Damai"],
+    "PWON": ["Pakuwon", "Pakuwon Jati"],
+    "SMGR": ["Semen Indonesia", "Semen Gresik"],
+    "INTP": ["Indocement", "Indo Cement"],
+    "JSMR": ["Jasa Marga"],
+    "WSKT": ["Waskita", "Waskita Karya"],
+    "WIKA": ["Wijaya Karya", "WIKA"],
+    "PTPP": ["PP Persero", "Pembangunan Perumahan"],
+    "AKRA": ["AKR Corporindo", "AKR"],
+    "EXCL": ["XL Axiata", "XL"],
+    "ISAT": ["Indosat", "Indosat Ooredoo"],
+    "TOWR": ["Sarana Menara", "Towel", "TOWR"],
+    "MTEL": ["Mitratel", "MTEL"],
+    "GOTO": ["GoTo", "Gojek", "Tokopedia"],
+    "BUKA": ["Bukalapak"],
+    "EMTK": ["Elang Mahkota", "EMTK"],
+    "SCMA": ["Surya Citra", "SCTV"],
+    "MNCN": ["Media Nusantara", "MNC"],
+    "FILM": ["MD Pictures", "FILM"],
+    "PANS": ["Panin Sekuritas", "PANS"],
+    "SMRA": ["Summarecon", "Summarecon Agung"],
+    "LPKR": ["Lippo Karawaci", "Lippo"],
+    "MAPI": ["Mitra Adiperkasa", "MAP"],
+    "ACES": ["Ace Hardware", "ACE"],
+    "LPPF": ["Matahari Department", "Matahari"],
+    "ERAA": ["Erajaya", "Erafone"],
+    "SIDO": ["Sido Muncul"],
+    "GGRM": ["Gudang Garam"],
+    "BSSR": ["Baramulti", "BSSR"],
+    "HRUM": ["Harum Energy", "HRUM"],
+    "TPIA": ["Chandra Asri", "TPIA"],
+    "BRPT": ["Barito Pacific", "Barito"],
+    "MDIY": ["Mitra10", "MDIY"],
+    # Telco & digital
+    "WIFI": ["Solusi Sinergi Digital", "Solusinews", "WIFI"],
+    "FREN": ["Smartfren", "Smart Telecom"],
+    "HALO": ["Telkomsel", "HALO"],
+    # Bank & finance
+    "BRIS": ["Bank Syariah Indonesia", "BSI", "BRI Syariah"],
+    "MEGA": ["Bank Mega"],
+    "BNLI": ["Bank Permata", "Permata"],
+    "BNGA": ["CIMB Niaga", "CIMB"],
+    "NISP": ["Bank OCBC", "OCBC NISP"],
+    "BDMN": ["Bank Danamon", "Danamon"],
+    "BJBR": ["Bank BJB", "BJB"],
+    "BJTM": ["Bank Jatim"],
+    "AGRO": ["Bank Agro", "BRI Agro"],
+    "PNBN": ["Bank Panin", "Panin"],
+    # Consumer & retail
+    "MYOR": ["Mayora", "Mayora Indah"],
+    "ULTJ": ["Ultra Jaya", "UHT"],
+    "ICBP": ["Indofood CBP"],
+    "ROTI": ["Nippon Indosari", "Sari Roti"],
+    "CLEO": ["Sariguna", "Cleo"],
+    "CAMP": ["Campina"],
+    "GOOD": ["Garudafood"],
+    # Property
+    "DMAS": ["Puradelta Lestari", "Deltamas"],
+    "APLN": ["Agung Podomoro", "Podomoro"],
+    "ASRI": ["Alam Sutera", "Alam Sutera Realty"],
+    "KIJA": ["Kawasan Industri Jababeka", "Jababeka"],
+    # Energy & mining
+    "MEDC": ["Medco", "Medco Energi"],
+    "ENRG": ["Energi Mega Persada"],
+    "ELSA": ["Elnusa"],
+    "RUIS": ["Radiant Utama"],
+    "ESSA": ["ESSA Industries"],
+    "HRUM": ["Harum Energy"],
+    "INDY": ["Indika Energy", "Indika"],
+    "BUMI": ["Bumi Resources"],
+    "KKGI": ["Resource Alam Indonesia"],
+    # Infrastructure & construction
+    "TOLL": ["Margautama Nusantara"],
+    "WTON": ["Wijaya Karya Beton", "WIKA Beton"],
+    "ACST": ["Acset Indonusa"],
+    # Healthcare & pharma
+    "KAEF": ["Kimia Farma"],
+    "KLBF": ["Kalbe", "Kalbe Farma"],
+    "MIKA": ["Mitra Keluarga"],
+    "SILO": ["Siloam Hospital", "Siloam"],
+    "TSPC": ["Tempo Scan", "Tempo Scan Pacific"],
+    "PYFA": ["Pyridam Farma"],
+    # Auto & heavy equipment
+    "ASSA": ["Adi Sarana Armada"],
+    "HEXA": ["Hexindo Adiperkasa", "Hexindo"],
+    "TURI": ["Tunas Ridean", "Tunas Toyota"],
+    # Tech & startup
+    "DMMX": ["Digital Mediatama", "DMMX"],
+    "INET": ["Indointernet", "INET"],
+    "MTDL": ["Metrodata Electronics", "Metrodata"],
+    # Agribusiness
+    "AALI": ["Astra Agro Lestari", "Astra Agro"],
+    "LSIP": ["PP London Sumatra", "Lonsum"],
+    "SSMS": ["Sawit Sumbermas", "SSMS"],
+    "TAPG": ["Tunas Baru Lampung"],
+    # Others mentioned in CIA groups
+    "GOTO": ["GoTo", "Gojek", "Tokopedia", "Gotogroup"],
+    "MAPA": ["Mitra Adiperkasa", "MAP", "Sports Station"],
+    "RBMS": ["Ristia Bintang Mahkotasejati", "RBMS"],
+    "MKAP": ["Cahayasakti Investindo", "MKAP"],
+    "RGAS": ["Royalindo Investa Wijaya", "RGAS"],
+    "KOCI": ["Koperasi Simpan Pinjam", "KOCI"],
+    "VALM": ["Valentindo Surya", "VALM"],
+    "VNOW": ["Venteny", "VNOW"],
+    "TIRA": ["Tira Austenite", "TIRA"],
+    "SCMA": ["Surya Citra", "SCTV", "Indosiar"],
+    "EMTK": ["Elang Mahkota", "Emtek"],
+    "MGNA": ["Magna Finance", "MGNA"],
+}
+
 # feedparser is bundled with agent-reach (installed globally)
 try:
     import feedparser
@@ -44,15 +181,20 @@ RSS_FEEDS: dict[str, list[dict]] = {
         {"url": "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100003114", "name": "CNBC Top News"},
     ],
     # Indonesian stock market news — IDX/BEI focused
-    # Verified working (2026-06): kontan ✓, cnbcindonesia ✓, idxchannel ✓, katadata ✓, emitennews ✓
+    # Verified working (2026-06-29, text/xml confirmed):
+    #   kontan ✓, cnbcindonesia ✓, idxchannel ✓, katadata ✓, detikfinance ✓
     # bisnis.com: no RSS, scraped from market.bisnis.com
-    # Removed: pasarmodal.inilah.com (timeout), idx.co.id (Cloudflare 403)
+    # Removed/not available:
+    #   emitennews.com  → returns HTML bukan RSS (broken)
+    #   pasarmodal.inilah.com → timeout
+    #   idx.co.id → Cloudflare 403
+    #   stockbit.com → Next.js SPA, tidak bisa di-scrape tanpa headless browser
     "indonesia": [
         {"url": "https://investasi.kontan.co.id/rss", "name": "Kontan Investasi"},
         {"url": "https://www.cnbcindonesia.com/market/rss", "name": "CNBC Indonesia Market"},
         {"url": "https://www.idxchannel.com/rss", "name": "IDX Channel"},
         {"url": "https://katadata.co.id/rss", "name": "Katadata"},
-        {"url": "https://emitennews.com/?feed=rss2", "name": "Emiten News"},
+        {"url": "https://finance.detik.com/rss", "name": "Detik Finance"},
     ],
     "all": [
         {"url": "https://finance.yahoo.com/news/rssindex", "name": "Yahoo Finance"},
@@ -153,10 +295,12 @@ def fetch_news(
                 title = entry.get("title", "")
                 summary = entry.get("summary", "") or entry.get("description", "")
 
-                # Symbol filter
+                # Symbol filter — match ticker OR any known company name alias
                 if symbol:
                     combined = f"{title} {summary}".upper()
-                    if symbol.upper() not in combined:
+                    search_terms = [symbol.upper()]
+                    search_terms += [alias.upper() for alias in IDX_TICKER_ALIASES.get(symbol.upper(), [])]
+                    if not any(term in combined for term in search_terms):
                         continue
 
                 results.append({
@@ -175,7 +319,11 @@ def fetch_news(
         remaining = limit - len(results)
         scraped = _scrape_bisnis_market(limit=remaining)
         if symbol:
-            scraped = [a for a in scraped if symbol.upper() in a["title"].upper()]
+            sym_terms = [symbol.upper()] + [a.upper() for a in IDX_TICKER_ALIASES.get(symbol.upper(), [])]
+            scraped = [
+                a for a in scraped
+                if any(term in a["title"].upper() for term in sym_terms)
+            ]
         results.extend(scraped)
 
     return results[:limit]

@@ -83,6 +83,213 @@ def _idr_liquidity_check(avg_vol: Optional[float], close: Optional[float]) -> di
     }
 
 
+# ── Shared batch scan helper ──────────────────────────────────────────────────
+
+def _batch_scan_idx(
+    index_filter: str = "",
+    timeframe:    str = "1D",
+) -> List[dict]:
+    """
+    Batch scan IDX symbols via tradingview_ta.
+
+    Returns list of dicts: {symbol, indicators, change_pct}
+    Used by screen_idx_stocks, analyze_idx_index, and scan_by_signal.
+    """
+    if not _TA_AVAILABLE:
+        return []
+
+    if index_filter:
+        idx_key = index_filter.strip().upper()
+        symbols = IDX_INDICES[idx_key]["get_symbols"]() if idx_key in IDX_INDICES else []
+    else:
+        symbols = load_symbols("idx")
+
+    if not symbols:
+        return []
+
+    results: List[dict] = []
+    batch_size = 200
+
+    for i in range(0, len(symbols), batch_size):
+        batch = symbols[i : i + batch_size]
+        try:
+            analysis = _get_multiple_analysis(
+                screener=_IDX_SCREENER,
+                interval=timeframe,
+                symbols=batch,
+            )
+        except Exception:
+            continue
+
+        present = [sym for sym, data in analysis.items() if data is not None]
+        atr_map: dict = {}
+        if present:
+            try:
+                atr_map = fetch_atr_for_tickers(present, _IDX_SCREENER, timeframe)
+            except Exception:
+                pass
+
+        for sym, data in analysis.items():
+            if data is None:
+                continue
+            try:
+                ind = data.indicators
+                if ind.get("ATR") is None and sym in atr_map:
+                    ind["ATR"] = atr_map[sym]
+                o = ind.get("open")
+                c = ind.get("close")
+                if not o or not c or o <= 0:
+                    continue
+                results.append({
+                    "symbol":     sym,
+                    "indicators": ind,
+                    "change_pct": ((c - o) / o) * 100,
+                })
+            except Exception:
+                continue
+
+    return results
+
+
+# ── IDX Top Gainers / Losers ───────────────────────────────────────────────────
+
+_TF_TO_TV: dict = {
+    "1D": "1D", "1W": "1W", "1M": "1M",
+    "4H": "240", "4h": "240",
+    "1H": "60",  "1h": "60",
+    "15m": "15", "5m": "5",
+}
+
+
+def get_idx_top_gainers(
+    timeframe:      str   = "1D",
+    limit:          int   = 30,
+    min_change_pct: float = 0.0,
+    min_volume_idr: float = 0.0,
+    mode:           str   = "gainers",
+    index_filter:   str   = "",
+) -> dict:
+    """
+    Full-universe IDX top gainers/losers (~866 saham) via tradingview-screener Query.
+
+    Menggunakan Query API langsung (bukan coinlist) sehingga mencakup SELURUH IDX
+    termasuk saham kecil/mid-cap yang sering jadi top movers.
+
+    Args:
+        timeframe:      1D (default), 1W, 4H, 1H, 15m
+        limit:          Max hasil (max 100)
+        min_change_pct: Filter minimum % change (0 = semua)
+        min_volume_idr: Filter minimum nilai transaksi dalam IDR (raw, bukan juta)
+        mode:           "gainers" | "losers"
+        index_filter:   LQ45, IDX30, IDX80, KOMPAS100, dll (kosong = semua IDX)
+    """
+    try:
+        from tradingview_screener import Query
+        from tradingview_screener.column import Column
+    except ImportError:
+        return {"error": "tradingview-screener tidak tersedia. Jalankan: uv sync"}
+
+    suffix = _TF_TO_TV.get(timeframe, "1D")
+
+    def _c(name: str) -> str:
+        """Tambahkan suffix timeframe ke nama kolom (jika bukan 1D)."""
+        return f"{name}|{suffix}" if suffix != "1D" else name
+
+    cols = [
+        _c("open"), _c("close"), _c("volume"),
+        _c("RSI"), _c("EMA20"), _c("EMA50"), _c("EMA200"),
+        _c("change"),
+        "name", "sector", "industry",
+    ]
+
+    # Build query — scan seluruh IDX market
+    ascending = (mode == "losers")
+    q = (Query()
+         .set_markets("indonesia")
+         .select(*cols)
+         .order_by(_c("change"), ascending=ascending)
+         .limit(1000))
+
+    # Batasi ke konstituen index tertentu jika diminta
+    if index_filter:
+        idx_key = index_filter.strip().upper()
+        if idx_key in IDX_INDICES:
+            raw_syms = IDX_INDICES[idx_key]["get_symbols"]()
+            tv_syms  = [s if s.startswith("IDX:") else f"IDX:{s}" for s in raw_syms]
+            q = q.set_tickers(*tv_syms)
+        else:
+            return {
+                "error"    : f"Index tidak dikenal: {index_filter}",
+                "available": list(IDX_INDICES.keys()),
+            }
+
+    try:
+        total, df = q.get_scanner_data()
+    except Exception as exc:
+        return {"error": f"Gagal fetch data: {exc}"}
+
+    if df is None or df.empty:
+        return {"error": "Tidak ada data dari IDX"}
+
+    # Normalize kolom: hapus suffix (mis "close|240" → "close")
+    df.rename(columns=lambda c: c.split("|")[0] if isinstance(c, str) else c, inplace=True)
+
+    results: List[dict] = []
+
+    for _, row in df.iterrows():
+        sym    = str(row.get("ticker", ""))
+        close  = row.get("close") or 0
+        open_  = row.get("open")  or 0
+        vol    = row.get("volume") or 0
+        change = row.get("change") or 0
+        vol_idr = vol * close
+
+        # Filter volume
+        if min_volume_idr > 0 and vol_idr < min_volume_idr:
+            continue
+        # Filter change
+        if mode == "gainers" and change < min_change_pct:
+            continue
+        if mode == "losers" and change > -abs(min_change_pct):
+            continue
+
+        ticker = sym.replace("IDX:", "")
+        ema20  = row.get("EMA20")
+        ema50  = row.get("EMA50")
+        ema200 = row.get("EMA200")
+        rsi    = row.get("RSI")
+
+        ma_pos_parts = []
+        if ema20  and close > ema20:  ma_pos_parts.append("↑EMA20")
+        if ema50  and close > ema50:  ma_pos_parts.append("↑EMA50")
+        if ema200 and close > ema200: ma_pos_parts.append("↑EMA200")
+
+        # Sektor: pakai langsung dari TV screener, fallback ke static map
+        sector = str(row.get("sector") or get_sector_label(ticker))
+
+        results.append({
+            "ticker"    : ticker,
+            "name"      : str(row.get("name", "")),
+            "price"     : round(close),
+            "change_pct": round(change, 2),
+            "volume_idr": round(vol_idr / 1_000_000, 1),
+            "rsi"       : round(rsi, 1) if rsi else None,
+            "ma_pos"    : " ".join(ma_pos_parts) if ma_pos_parts else "below all MA",
+            "sector"    : sector,
+        })
+
+    limit = max(1, min(limit, 100))
+
+    return {
+        "mode"         : mode,
+        "timeframe"    : timeframe,
+        "index_filter" : index_filter or "All IDX",
+        "total_scanned": total,
+        "total_passed" : len(results),
+        "results"      : results[:limit],
+    }
+
+
 # ── Stock Screener ─────────────────────────────────────────────────────────────
 
 def screen_idx_stocks(
