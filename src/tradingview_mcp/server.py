@@ -93,6 +93,7 @@ from tradingview_mcp.core.services.telegram_service import (
     telegram_read_folder as _tg_read_folder,
     telegram_query_knowledge as _tg_query_kb,
     telegram_knowledge_stats as _tg_kb_stats,
+    telegram_cia_alerts as _tg_cia_alerts,
 )
 from tradingview_mcp.core.services.vector_service import (
     semantic_search as _vec_search,
@@ -1477,7 +1478,7 @@ def telegram_read_messages(
 @mcp.tool()
 def telegram_stock_sentiment(
     ticker:         str,
-    chats:          list,
+    chats:          Optional[list] = None,
     hours_back:     int = 48,
     limit_per_chat: int = 100,
 ) -> dict:
@@ -1488,16 +1489,16 @@ def telegram_stock_sentiment(
 
     Args:
         ticker:         Kode saham IDX (contoh: "BBCA", "GOTO", "TLKM")
-        chats:          List identifier grup/channel (username atau ID numerik)
+        chats:          List identifier grup/channel (username atau ID numerik).
+                        Jika tidak diisi, otomatis pakai semua grup di knowledge base.
         hours_back:     Rentang waktu dalam jam (default 48)
         limit_per_chat: Max pesan per chat (default 100)
 
     Example:
+        telegram_stock_sentiment("BBCA")
         telegram_stock_sentiment("BBCA", ["@sahamindo", "@forumidx", "-1001234567"])
         telegram_stock_sentiment("GOTO", ["@investasiidx"], hours_back=72)
     """
-    if not isinstance(chats, list) or len(chats) == 0:
-        return {"success": False, "error": "Parameter 'chats' harus berupa list minimal 1 chat"}
     return _tg_sentiment(
         ticker=ticker,
         chats=chats,
@@ -1550,6 +1551,8 @@ def telegram_query_knowledge(
     keyword:   Optional[str] = None,
     days_back: int = 7,
     limit:     int = 30,
+    date_from: Optional[str] = None,
+    date_to:   Optional[str] = None,
 ) -> dict:
     """Query knowledge base Telegram lokal — sentimen forum saham IDX dari grup yang sudah dibaca.
 
@@ -1563,14 +1566,19 @@ def telegram_query_knowledge(
         keyword:   Cari kata kunci dalam teks (contoh: "rights issue", "dividen", "bandar")
         days_back: Rentang hari ke belakang (default 7)
         limit:     Maks hasil (default 30)
+        date_from: Filter pesan mulai tanggal ini (ISO: "2026-06-01"). Override days_back.
+        date_to:   Filter pesan sampai tanggal ini (ISO: "2026-06-30").
 
     Examples:
         telegram_query_knowledge(ticker="BBCA") → semua diskusi BBCA dari forum
         telegram_query_knowledge(keyword="bandar", days_back=3)
         telegram_query_knowledge(ticker="GOTO", group="saham")
+        telegram_query_knowledge(ticker="PKPK", date_from="2026-06-01", date_to="2026-06-15")
+        telegram_query_knowledge(keyword="ARA", date_from="2026-06-29")
     """
     return _tg_query_kb(ticker=ticker, group=group, keyword=keyword,
-                        days_back=days_back, limit=limit)
+                        days_back=days_back, limit=limit,
+                        date_from=date_from, date_to=date_to)
 
 
 @mcp.tool()
@@ -1581,6 +1589,31 @@ def telegram_knowledge_stats() -> dict:
     Tidak perlu koneksi Telegram aktif.
     """
     return _tg_kb_stats()
+
+
+@mcp.tool()
+def telegram_cia_alerts(
+    days_back: int = 7,
+    ticker: Optional[str] = None,
+) -> dict:
+    """Parse alert dari CIAbot IHSG Alert group jadi data terstruktur.
+    Ekstrak ticker, CIA setup keywords, dan harga yang disebutkan.
+
+    Query knowledge base lokal untuk pesan dari grup 'CIAbot IHSG Alert',
+    lalu parsing setiap pesan untuk mendeteksi:
+    - ticker IDX 4-huruf (regex)
+    - CIA setup keywords: RAINBOW, KAMEHAMEHA, KAME, SUPERKETAT, KETAT, STAR, SUNFLOWER, ARA, ARB, BREAKOUT
+    - harga IDX yang disebutkan (3-5 digit)
+
+    Args:
+        days_back: Ambil alert N hari ke belakang (default 7)
+        ticker:    Filter hanya alert yang menyebut saham ini (optional, contoh: "PKPK")
+
+    Examples:
+        telegram_cia_alerts()
+        telegram_cia_alerts(days_back=3, ticker="EMDE")
+    """
+    return _tg_cia_alerts(days_back=days_back, ticker=ticker)
 
 
 @mcp.tool()

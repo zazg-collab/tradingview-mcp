@@ -42,10 +42,92 @@ Catatan teknis:
 """
 from __future__ import annotations
 
+import os
+import sqlite3
+from datetime import datetime, timedelta
 from typing import List, Optional
 
 from tradingview_mcp.core.data.idx_indices import IDX_INDICES
 from tradingview_mcp.core.data.idx_sectors import get_sector_label
+
+# ── Telegram knowledge base ───────────────────────────────────────────────────
+_TG_DB_PATH = os.path.expanduser("~/.mcp_atila_knowledge.db")
+
+
+def _tg_signal_for_ticker(ticker: str) -> dict:
+    """
+    Query the Telegram knowledge base SQLite DB for community signals about
+    a given ticker. Returns a dict with mentions count, last mention date,
+    whether CIAbot IHSG Alert group mentioned it, and sentiment.
+
+    Returns {"available": False} if the DB is missing or any error occurs.
+    """
+    try:
+        if not os.path.exists(_TG_DB_PATH):
+            return {"available": False}
+
+        conn = sqlite3.connect(_TG_DB_PATH, timeout=5)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        cutoff = (datetime.utcnow() - timedelta(days=7)).strftime("%Y-%m-%d")
+        pattern = f"%{ticker}%"
+
+        # Count mentions in last 7 days + get last mention date + check CIAbot group
+        cursor.execute(
+            """
+            SELECT
+                COUNT(*) AS mentions_7d,
+                MAX(date) AS last_mention,
+                SUM(CASE WHEN group_name LIKE '%CIAbot IHSG Alert%' THEN 1 ELSE 0 END) AS ciabot_count
+            FROM messages
+            WHERE tickers LIKE ?
+              AND date >= ?
+            """,
+            (pattern, cutoff),
+        )
+        row = cursor.fetchone()
+
+        mentions_7d  = int(row["mentions_7d"] or 0)
+        last_mention = row["last_mention"]
+        ciabot_alert = int(row["ciabot_count"] or 0) > 0
+
+        # Sentiment: pick the most recent non-null sentiment in the window
+        sentiment = "NEUTRAL"
+        if mentions_7d > 0:
+            cursor.execute(
+                """
+                SELECT sentiment FROM messages
+                WHERE tickers LIKE ?
+                  AND date >= ?
+                  AND sentiment IS NOT NULL
+                  AND sentiment != ''
+                ORDER BY date DESC
+                LIMIT 1
+                """,
+                (pattern, cutoff),
+            )
+            sent_row = cursor.fetchone()
+            if sent_row and sent_row["sentiment"]:
+                sentiment = str(sent_row["sentiment"]).upper()
+
+        conn.close()
+
+        # Trim last_mention to "YYYY-MM-DD HH:MM" for readability
+        if last_mention and len(last_mention) > 16:
+            last_mention = last_mention[:16]
+
+        return {
+            "available"   : True,
+            "mentions_7d" : mentions_7d,
+            "last_mention": last_mention,
+            "ciabot_alert": ciabot_alert,
+            "sentiment"   : sentiment,
+        }
+
+    except Exception:
+        return {"available": False}
+
 
 # ── Timeframe mapping ────────────────────────────────────────────────────────
 _TF_TO_TV: dict = {
@@ -420,14 +502,15 @@ def scan_cia_setups(
         sector = str(row.get("sector") or get_sector_label(ticker))
 
         entry: dict = {
-            "ticker"    : ticker,
-            "name"      : str(row.get("name", "")),
-            "price"     : round(close),
-            "change_pct": round(change, 2),
-            "volume_idr": round(vol_idr / 1_000_000, 1),
-            "rsi"       : round(rsi, 1) if rsi else None,
-            "setups"    : setups,
-            "sector"    : sector,
+            "ticker"          : ticker,
+            "name"            : str(row.get("name", "")),
+            "price"           : round(close),
+            "change_pct"      : round(change, 2),
+            "volume_idr"      : round(vol_idr / 1_000_000, 1),
+            "rsi"             : round(rsi, 1) if rsi else None,
+            "setups"          : setups,
+            "sector"          : sector,
+            "telegram_signal" : _tg_signal_for_ticker(ticker),
             **ma_dist,
         }
 

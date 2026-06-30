@@ -793,7 +793,7 @@ def telegram_read_messages(
 
 def telegram_stock_sentiment(
     ticker: str,
-    chats: list[str],
+    chats: Optional[list] = None,
     hours_back: int = 48,
     limit_per_chat: int = 100,
 ) -> dict:
@@ -802,7 +802,8 @@ def telegram_stock_sentiment(
 
     Args:
         ticker:         Kode saham IDX (contoh: "BBCA", "GOTO", "TLKM")
-        chats:          List identifier grup/channel (username atau ID)
+        chats:          List identifier grup/channel (username atau ID).
+                        Jika None, gunakan semua group_id dari knowledge base.
         hours_back:     Rentang waktu mundur dalam jam (default 48)
         limit_per_chat: Max pesan per chat (default 100)
     """
@@ -810,6 +811,20 @@ def telegram_stock_sentiment(
         return _not_available("telegram_stock_sentiment")
     if not os.path.exists(SESSION_FILE):
         return _no_session()
+
+    # If chats not provided, fall back to all group_ids in the knowledge base
+    if chats is None:
+        try:
+            conn = _init_db()
+            rows = conn.execute(
+                "SELECT DISTINCT group_id FROM messages WHERE group_id IS NOT NULL AND group_id != ''"
+            ).fetchall()
+            conn.close()
+            chats = [r[0] for r in rows]
+        except Exception as e:
+            return {"success": False, "error": f"Gagal mengambil group_ids dari knowledge base: {e}"}
+        if not chats:
+            return {"success": False, "error": "Tidak ada grup tersimpan di knowledge base. Jalankan telegram_read_folder dulu."}
 
     all_texts = []
     chat_results = []
@@ -928,6 +943,8 @@ def telegram_query_knowledge(
     keyword:   Optional[str] = None,
     days_back: int = 7,
     limit:     int = 30,
+    date_from: Optional[str] = None,  # ISO date: "2026-06-01"
+    date_to:   Optional[str] = None,  # ISO date: "2026-06-30"
 ) -> dict:
     """
     Query knowledge base Telegram yang sudah tersimpan di lokal.
@@ -942,6 +959,8 @@ def telegram_query_knowledge(
         keyword:   Filter berdasarkan kata kunci dalam teks pesan
         days_back: Ambil data N hari ke belakang (default 7)
         limit:     Maks pesan yang dikembalikan (default 30)
+        date_from: Filter pesan mulai tanggal ini (ISO format: "2026-06-01"). Override days_back jika diisi.
+        date_to:   Filter pesan sampai tanggal ini (ISO format: "2026-06-30"). Default: hari ini.
 
     Use cases:
         - telegram_query_knowledge(ticker="BBCA") → sentimen forum tentang BBCA
@@ -962,7 +981,13 @@ def telegram_query_knowledge(
         if keyword:
             conditions.append("(text LIKE ? OR media_text LIKE ?)")
             params.extend([f"%{keyword}%", f"%{keyword}%"])
-        if days_back:
+        if date_from:
+            conditions.append("date >= ?")
+            params.append(date_from[:10])
+            if date_to:
+                conditions.append("date <= ?")
+                params.append(date_to[:10])
+        elif days_back:
             cutoff = (datetime.now(timezone.utc) - timedelta(days=days_back)).isoformat()
             conditions.append("date >= ?")
             params.append(cutoff[:10])  # YYYY-MM-DD prefix match
@@ -984,7 +1009,7 @@ def telegram_query_knowledge(
         overall = "Bullish" if bull > bear else ("Bearish" if bear > bull else "Neutral")
 
         return {
-            "query": {"ticker": ticker, "group": group, "keyword": keyword, "days_back": days_back},
+            "query": {"ticker": ticker, "group": group, "keyword": keyword, "days_back": days_back, "date_from": date_from, "date_to": date_to},
             "count": len(rows),
             "sentiment_summary": {
                 "overall":  overall,
@@ -1036,3 +1061,95 @@ def telegram_knowledge_stats() -> dict:
         }
     except Exception as e:
         return {"error": str(e)}
+
+
+_CIA_SETUP_KEYWORDS = [
+    "RAINBOW", "KAMEHAMEHA", "KAME", "SUPERKETAT", "KETAT",
+    "STAR", "SUNFLOWER", "ARA", "ARB", "BREAKOUT",
+]
+
+
+def telegram_cia_alerts(
+    days_back: int = 7,
+    ticker: Optional[str] = None,
+) -> dict:
+    """
+    Parse pesan dari CIAbot IHSG Alert group di knowledge base jadi data terstruktur.
+
+    Ekstrak ticker IDX, CIA setup keywords, dan harga yang disebutkan dari setiap alert.
+
+    Args:
+        days_back: Ambil alert N hari ke belakang (default 7)
+        ticker:    Filter hanya alert yang menyebut saham ini (optional, contoh: "PKPK")
+    """
+    import re
+
+    try:
+        conn = _init_db()
+        conditions: list[str] = ["group_name LIKE ?"]
+        params: list = ["%CIAbot IHSG Alert%"]
+
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days_back)).isoformat()
+        conditions.append("date >= ?")
+        params.append(cutoff[:10])
+
+        if ticker:
+            t = ticker.upper()
+            conditions.append("(tickers LIKE ? OR text LIKE ?)")
+            params.extend([f"%{t}%", f"%{t}%"])
+
+        where = f"WHERE {' AND '.join(conditions)}"
+        cur = conn.execute(
+            f"SELECT group_name, group_id, sender, date, text, tickers, sentiment "
+            f"FROM messages {where} ORDER BY date DESC LIMIT 200",
+            params,
+        )
+        rows = cur.fetchall()
+        conn.close()
+
+        alerts = []
+        for group_name, group_id, sender, date, text, tickers_col, sentiment in rows:
+            text_str = text or ""
+            text_upper = text_str.upper()
+
+            # Extract 4-letter uppercase IDX ticker codes from text
+            raw_tickers = re.findall(r'\b[A-Z]{4}\b', text_upper)
+            # Merge with stored tickers column
+            stored = [t.strip() for t in (tickers_col or "").split(",") if t.strip()]
+            tickers_detected = sorted(set(raw_tickers) | set(stored))
+
+            # CIA setup keywords present in text
+            setup_keywords = [kw for kw in _CIA_SETUP_KEYWORDS if kw in text_upper]
+
+            # Extract IDX-like prices: 3-5 digit numbers, optionally with comma/dot separator
+            price_matches = re.findall(r'\b(\d{3,5}(?:[,\.]\d{2,3})?)\b', text_str)
+            prices_mentioned: list = []
+            for p in price_matches:
+                try:
+                    prices_mentioned.append(int(p.replace(",", "").replace(".", "")))
+                except ValueError:
+                    pass
+
+            # Format date to "YYYY-MM-DD HH:MM"
+            date_fmt = str(date)[:16].replace("T", " ") if date else ""
+
+            alerts.append({
+                "date":             date_fmt,
+                "text":             text_str[:500],
+                "tickers_detected": tickers_detected,
+                "setup_keywords":   setup_keywords,
+                "prices_mentioned": sorted(set(prices_mentioned)),
+                "group":            group_name,
+                "sender":           sender or "",
+                "sentiment":        sentiment or "",
+            })
+
+        return {
+            "success":       True,
+            "days_back":     days_back,
+            "ticker_filter": ticker,
+            "total_alerts":  len(alerts),
+            "alerts":        alerts,
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
