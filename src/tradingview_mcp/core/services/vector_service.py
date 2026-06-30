@@ -268,13 +268,14 @@ def semantic_search(
                 continue
             similarity = round(1 - dist, 3)   # cosine distance → similarity
             hits.append({
-                "text":       doc,
-                "similarity": similarity,
-                "group":      meta.get("group", ""),
-                "sender":     meta.get("sender", ""),
-                "date":       meta.get("date", ""),
-                "tickers":    meta.get("tickers", "").split(",") if meta.get("tickers") else [],
-                "sentiment":  meta.get("sentiment", "neutral"),
+                "text":           doc,
+                "similarity":     similarity,
+                "low_confidence": similarity < 0.35,
+                "group":          meta.get("group", ""),
+                "sender":         meta.get("sender", ""),
+                "date":           meta.get("date", ""),
+                "tickers":        meta.get("tickers", "").split(",") if meta.get("tickers") else [],
+                "sentiment":      meta.get("sentiment", "neutral"),
             })
 
         # Sort by similarity descending, cap at n_results
