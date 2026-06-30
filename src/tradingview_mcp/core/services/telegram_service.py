@@ -812,19 +812,45 @@ def telegram_stock_sentiment(
     if not os.path.exists(SESSION_FILE):
         return _no_session()
 
-    # If chats not provided, fall back to all group_ids in the knowledge base
+    # If chats not provided, query knowledge base offline (fast, no live Telegram)
     if chats is None:
         try:
+            t = ticker.upper()
+            cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours_back)).isoformat()
             conn = _init_db()
             rows = conn.execute(
-                "SELECT DISTINCT group_id FROM messages WHERE group_id IS NOT NULL AND group_id != ''"
+                "SELECT group_name, text, sentiment FROM messages "
+                "WHERE (tickers LIKE ? OR text LIKE ?) AND date >= ? "
+                "ORDER BY date DESC LIMIT 100",
+                [f"%{t}%", f"%{t}%", cutoff[:16]],
             ).fetchall()
             conn.close()
-            chats = [r[0] for r in rows]
+            texts = [r[1] or "" for r in rows]
+            per_group: dict = {}
+            for gname, txt, sent in rows:
+                per_group.setdefault(gname, []).append(txt or "")
+            combined_sentiment = _analyze_sentiment(texts)
+            per_chat = [
+                {
+                    "chat":      gname,
+                    "messages":  len(msgs),
+                    "sentiment": _analyze_sentiment(msgs),
+                    "samples":   [m[:150] for m in msgs[:3]],
+                }
+                for gname, msgs in per_group.items()
+            ]
+            return {
+                "success":            True,
+                "ticker":             ticker,
+                "source":             "knowledge_base",
+                "hours_back":         hours_back,
+                "total_messages":     len(texts),
+                "combined_sentiment": combined_sentiment,
+                "per_chat":           per_chat,
+                "errors":             [],
+            }
         except Exception as e:
-            return {"success": False, "error": f"Gagal mengambil group_ids dari knowledge base: {e}"}
-        if not chats:
-            return {"success": False, "error": "Tidak ada grup tersimpan di knowledge base. Jalankan telegram_read_folder dulu."}
+            return {"success": False, "error": f"KB query error: {e}"}
 
     all_texts = []
     chat_results = []
@@ -850,6 +876,7 @@ def telegram_stock_sentiment(
     return {
         "success":            True,
         "ticker":             ticker,
+        "source":             "live_telegram",
         "hours_back":         hours_back,
         "total_messages":     len(all_texts),
         "combined_sentiment": combined_sentiment,
@@ -1072,6 +1099,7 @@ _CIA_SETUP_KEYWORDS = [
 def telegram_cia_alerts(
     days_back: int = 7,
     ticker: Optional[str] = None,
+    limit: int = 50,
 ) -> dict:
     """
     Parse pesan dari CIAbot IHSG Alert group di knowledge base jadi data terstruktur.
@@ -1099,10 +1127,11 @@ def telegram_cia_alerts(
             params.extend([f"%{t}%", f"%{t}%"])
 
         where = f"WHERE {' AND '.join(conditions)}"
+        limit = max(1, min(200, limit))
         cur = conn.execute(
             f"SELECT group_name, group_id, sender, date, text, tickers, sentiment "
-            f"FROM messages {where} ORDER BY date DESC LIMIT 200",
-            params,
+            f"FROM messages {where} ORDER BY date DESC LIMIT ?",
+            params + [limit],
         )
         rows = cur.fetchall()
         conn.close()
@@ -1135,7 +1164,7 @@ def telegram_cia_alerts(
 
             alerts.append({
                 "date":             date_fmt,
-                "text":             text_str[:500],
+                "text":             text_str[:150],
                 "tickers_detected": tickers_detected,
                 "setup_keywords":   setup_keywords,
                 "prices_mentioned": sorted(set(prices_mentioned)),
@@ -1148,6 +1177,7 @@ def telegram_cia_alerts(
             "success":       True,
             "days_back":     days_back,
             "ticker_filter": ticker,
+            "limit":         limit,
             "total_alerts":  len(alerts),
             "alerts":        alerts,
         }

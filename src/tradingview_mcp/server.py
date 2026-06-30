@@ -1659,25 +1659,22 @@ def telegram_knowledge_stats() -> dict:
 def telegram_cia_alerts(
     days_back: int = 7,
     ticker: Optional[str] = None,
+    limit: int = 50,
 ) -> dict:
     """Parse alert dari CIAbot IHSG Alert group jadi data terstruktur.
     Ekstrak ticker, CIA setup keywords, dan harga yang disebutkan.
 
-    Query knowledge base lokal untuk pesan dari grup 'CIAbot IHSG Alert',
-    lalu parsing setiap pesan untuk mendeteksi:
-    - ticker IDX 4-huruf (regex)
-    - CIA setup keywords: RAINBOW, KAMEHAMEHA, KAME, SUPERKETAT, KETAT, STAR, SUNFLOWER, ARA, ARB, BREAKOUT
-    - harga IDX yang disebutkan (3-5 digit)
-
     Args:
         days_back: Ambil alert N hari ke belakang (default 7)
         ticker:    Filter hanya alert yang menyebut saham ini (optional, contoh: "PKPK")
+        limit:     Maks jumlah alert yang dikembalikan (default 50, maks 200)
 
     Examples:
         telegram_cia_alerts()
         telegram_cia_alerts(days_back=3, ticker="EMDE")
+        telegram_cia_alerts(limit=20)
     """
-    return _tg_cia_alerts(days_back=days_back, ticker=ticker)
+    return _tg_cia_alerts(days_back=days_back, ticker=ticker, limit=limit)
 
 
 @mcp.tool()
