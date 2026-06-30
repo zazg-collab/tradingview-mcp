@@ -84,6 +84,7 @@ from tradingview_mcp.core.services.signal_scan_service import (
 )
 from tradingview_mcp.core.services.cia_scanner_service import (
     scan_cia_setups as _scan_cia_setups,
+    scan_cia_tg_confirmed as _scan_cia_tg_confirmed,
 )
 from tradingview_mcp.core.services.telegram_service import (
     telegram_read_messages as _tg_read,
@@ -1429,6 +1430,69 @@ def scan_sector_rotation(
         timeframe=timeframe,
         tight_pct=max(0.5, min(20.0, tight_pct)),
         min_volume_idr=min_vol_raw,
+    )
+
+
+@mcp.tool()
+def scan_cia_tg_confirmed(
+    setup_filter:    str = "star",
+    days_back:       int = 7,
+    min_tg_mentions: int = 1,
+    index_filter:    str = "",
+    limit:           int = 20,
+) -> dict:
+    """Scan CIA setups dengan double-confirmation dari Telegram CIAbot alerts.
+
+    Menggabungkan sinyal teknikal CIA (STAR / Kamehameha / dll) dengan data
+    Telegram knowledge base lokal untuk menemukan saham yang punya KEDUA sinyal:
+      1. Setup teknikal CIA kuat (STAR, KAME, dsb)
+      2. Disebut minimal N kali di Telegram dalam X hari terakhir — terutama
+         dari grup CIAbot IHSG Alert
+
+    Scoring (confirmation_score):
+      cia_setup_score:   STAR=10, KAME+RAINBOW=8, SUPERKETAT=6, KETAT=4
+      tg bonus:          +2 per Telegram mention, +5 per CIAbot alert
+      total:             cia_setup_score + (tg_mentions × 2) + (ciabot_alerts × 5)
+
+    double_confirmed = True jika tg_mentions >= min_tg_mentions DAN ciabot_alerts > 0
+
+    Args:
+        setup_filter:    Tipe setup yang di-scan:
+                           "star"        → hanya STAR setup (default)
+                           "kame"        → hanya Kamehameha (volume explosion)
+                           "all_premium" → STAR + Kamehameha (union)
+        days_back:       Berapa hari ke belakang cek Telegram DB. Default 7.
+        min_tg_mentions: Minimum total mention Telegram untuk dianggap "confirmed".
+                         Default 1.
+        index_filter:    Filter ke index: LQ45, IDX30, IDX80, dll.
+                         Kosong = scan semua IDX.
+        limit:           Jumlah hasil yang dikembalikan (sorted by score). Default 20.
+
+    Returns:
+        scan_type, setup_filter, days_back, total_scanned,
+        double_confirmed_count, results (list)
+
+    Setiap result berisi:
+        ticker, price, change_pct, setups, vol_ratio_v60,
+        tg_mentions, ciabot_alerts, double_confirmed, confirmation_score
+
+    Example:
+        scan_cia_tg_confirmed()                         # STAR + TG confirm, 7 hari
+        scan_cia_tg_confirmed("kame", days_back=3)      # Kamehameha + TG, 3 hari
+        scan_cia_tg_confirmed("all_premium", limit=30)  # STAR+KAME, top 30
+        scan_cia_tg_confirmed("star", index_filter="LQ45")  # hanya LQ45
+        scan_cia_tg_confirmed(min_tg_mentions=2)        # butuh ≥2 mention TG
+    """
+    limit = max(1, min(100, limit))
+    days_back = max(1, min(90, days_back))
+    min_tg_mentions = max(1, min_tg_mentions)
+
+    return _scan_cia_tg_confirmed(
+        setup_filter    = setup_filter,
+        days_back       = days_back,
+        min_tg_mentions = min_tg_mentions,
+        index_filter    = index_filter,
+        limit           = limit,
     )
 
 

@@ -592,6 +592,218 @@ def scan_cia_setups(
     }
 
 
+def scan_cia_tg_confirmed(
+    setup_filter:    str = "star",
+    days_back:       int = 7,
+    min_tg_mentions: int = 1,
+    index_filter:    str = "",
+    limit:           int = 20,
+) -> dict:
+    """
+    Double-confirmation scanner: CIA technical setups + Telegram CIAbot alerts.
+
+    Combines scan_cia_setups (technical) with the Telegram knowledge base
+    (community signal) to surface stocks that have BOTH a strong CIA technical
+    setup AND at least one recent mention/alert in Telegram — especially from
+    the CIAbot IHSG Alert group.
+
+    Args:
+        setup_filter:    Which CIA setups to include: "star", "kame" (kamehameha),
+                         "all_premium" (star + kame combined). Default "star".
+        days_back:       How many days back to search the Telegram DB. Default 7.
+        min_tg_mentions: Minimum total Telegram mentions to count as "confirmed".
+                         Default 1.
+        index_filter:    Filter to a specific index: LQ45, IDX30, IDX80, etc.
+                         Empty = all IDX.
+        limit:           Max results to return (sorted by confirmation_score). Default 20.
+
+    Returns:
+        dict with scan_type, setup_filter, days_back, total_scanned,
+        double_confirmed_count, and results list.
+
+    Result per stock:
+        ticker, price, change_pct, setups, vol_ratio_v60,
+        tg_mentions, ciabot_alerts, double_confirmed, confirmation_score
+
+    Scoring:
+        cia_setup_score: STAR=10, KAME+RAINBOW=8, SUPERKETAT=6, KETAT=4
+        confirmation_score = cia_setup_score + (tg_mentions * 2) + (ciabot_alerts * 5)
+    """
+    # ── Step 1: Map setup_filter to scan_cia_setups parameter ─────────────────
+    _filter_map = {
+        "star"       : "star",
+        "kame"       : "kamehameha",
+        "all_premium": "all",   # will be filtered to star+kame below
+    }
+    tv_setup = _filter_map.get(setup_filter.lower(), "star")
+
+    cia_result = scan_cia_setups(
+        setup_filter    = tv_setup,
+        min_volume_idr  = 0,
+        index_filter    = index_filter,
+        limit           = 500,
+        timeframe       = "1D",
+        tight_pct       = DEFAULT_TIGHT_PCT,
+        kamehameha_ratio= DEFAULT_KAMEHAMEHA_RATIO,
+        min_above_ma20  = True,
+    )
+
+    if "error" in cia_result:
+        return cia_result
+
+    # ── Step 2: Flatten relevant buckets into a single candidate list ──────────
+    setups_dict = cia_result.get("setups", {})
+
+    if setup_filter.lower() == "star":
+        bucket_keys = [SETUP_STAR]
+    elif setup_filter.lower() == "kame":
+        bucket_keys = [SETUP_KAMEHAMEHA]
+    elif setup_filter.lower() == "all_premium":
+        bucket_keys = [SETUP_STAR, SETUP_KAMEHAMEHA]
+    else:
+        bucket_keys = [SETUP_STAR]
+
+    # Deduplicate by ticker (a stock can appear in multiple buckets)
+    seen_tickers: set = set()
+    candidates: list = []
+    for bkey in bucket_keys:
+        for entry in setups_dict.get(bkey, []):
+            t = entry.get("ticker", "")
+            if t and t not in seen_tickers:
+                seen_tickers.add(t)
+                candidates.append(entry)
+
+    total_scanned = len(candidates)
+
+    if not candidates or not os.path.exists(_TG_DB_PATH):
+        # Return CIA-only results with zeroed TG fields
+        results = []
+        for entry in candidates[:limit]:
+            setups = entry.get("setups", [])
+            cia_score = _cia_setup_score(setups)
+            r = {
+                "ticker"            : entry["ticker"],
+                "price"             : entry.get("price"),
+                "change_pct"        : entry.get("change_pct"),
+                "setups"            : setups,
+                "vol_ratio_v60"     : entry.get("vol_ratio_v60"),
+                "tg_mentions"       : 0,
+                "ciabot_alerts"     : 0,
+                "double_confirmed"  : False,
+                "confirmation_score": cia_score,
+            }
+            results.append(r)
+        return {
+            "scan_type"            : "cia_tg_confirmed",
+            "setup_filter"         : setup_filter,
+            "days_back"            : days_back,
+            "total_scanned"        : total_scanned,
+            "double_confirmed_count": 0,
+            "note"                 : "Telegram DB not available — CIA-only results",
+            "results"              : results,
+        }
+
+    # ── Step 3: Batch-query Telegram DB for all candidate tickers ─────────────
+    cutoff = (datetime.utcnow() - timedelta(days=days_back)).strftime("%Y-%m-%d")
+    tg_data: dict = {}   # ticker → {"tg_mentions": int, "ciabot_alerts": int}
+
+    try:
+        conn = sqlite3.connect(_TG_DB_PATH, timeout=5)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        for ticker in seen_tickers:
+            pattern = f"%{ticker}%"
+            try:
+                cursor.execute(
+                    """
+                    SELECT
+                        COUNT(*) AS total_mentions,
+                        SUM(CASE WHEN group_name LIKE '%CIAbot IHSG Alert%' THEN 1 ELSE 0 END)
+                            AS ciabot_count
+                    FROM messages
+                    WHERE tickers LIKE ?
+                      AND date >= ?
+                    """,
+                    (pattern, cutoff),
+                )
+                row = cursor.fetchone()
+                tg_data[ticker] = {
+                    "tg_mentions"  : int(row["total_mentions"] or 0),
+                    "ciabot_alerts": int(row["ciabot_count"]   or 0),
+                }
+            except Exception:
+                tg_data[ticker] = {"tg_mentions": 0, "ciabot_alerts": 0}
+
+        conn.close()
+    except Exception:
+        # DB open failed — proceed with zeroes
+        for ticker in seen_tickers:
+            tg_data[ticker] = {"tg_mentions": 0, "ciabot_alerts": 0}
+
+    # ── Step 4: Build enriched result list ────────────────────────────────────
+    results = []
+    for entry in candidates:
+        ticker = entry.get("ticker", "")
+        setups = entry.get("setups", [])
+        tg     = tg_data.get(ticker, {"tg_mentions": 0, "ciabot_alerts": 0})
+
+        tg_mentions   = tg["tg_mentions"]
+        ciabot_alerts = tg["ciabot_alerts"]
+
+        cia_score = _cia_setup_score(setups)
+        conf_score = cia_score + (tg_mentions * 2) + (ciabot_alerts * 5)
+
+        double_confirmed = (tg_mentions >= min_tg_mentions) and (ciabot_alerts > 0)
+
+        results.append({
+            "ticker"            : ticker,
+            "price"             : entry.get("price"),
+            "change_pct"        : entry.get("change_pct"),
+            "setups"            : setups,
+            "vol_ratio_v60"     : entry.get("vol_ratio_v60"),
+            "tg_mentions"       : tg_mentions,
+            "ciabot_alerts"     : ciabot_alerts,
+            "double_confirmed"  : double_confirmed,
+            "confirmation_score": conf_score,
+        })
+
+    # ── Step 5: Sort by confirmation_score desc, apply limit ──────────────────
+    results.sort(key=lambda x: x["confirmation_score"], reverse=True)
+    results = results[:limit]
+
+    double_confirmed_count = sum(1 for r in results if r["double_confirmed"])
+
+    return {
+        "scan_type"             : "cia_tg_confirmed",
+        "setup_filter"          : setup_filter,
+        "days_back"             : days_back,
+        "min_tg_mentions"       : min_tg_mentions,
+        "index_filter"          : index_filter or "All IDX",
+        "total_scanned"         : total_scanned,
+        "double_confirmed_count": double_confirmed_count,
+        "results"               : results,
+    }
+
+
+def _cia_setup_score(setups: list) -> int:
+    """
+    Return a numeric score for the strongest CIA setup in the list.
+    STAR=10, KAME+RAINBOW=8, SUPERKETAT=6, KETAT=4, anything else=2.
+    """
+    if SETUP_STAR in setups:
+        return 10
+    has_kame    = SETUP_KAMEHAMEHA in setups
+    has_rainbow = SETUP_RAINBOW    in setups
+    if has_kame and has_rainbow:
+        return 8
+    if SETUP_SUPERKETAT in setups:
+        return 6
+    if SETUP_KETAT in setups:
+        return 4
+    return 2
+
+
 def scan_sector_rotation(
     timeframe:  str   = "1D",
     tight_pct:  float = DEFAULT_TIGHT_PCT,

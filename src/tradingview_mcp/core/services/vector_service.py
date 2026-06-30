@@ -16,6 +16,7 @@ Download model ~470MB terjadi sekali, lalu cached di ~/.cache/huggingface/
 from __future__ import annotations
 
 import os
+import re
 import logging
 from typing import Optional
 
@@ -47,6 +48,50 @@ except ImportError:
     pass
 
 _SEMANTIC_OK = _CHROMA_OK and _ST_OK
+
+# ── CIA vocabulary expansion ──────────────────────────────────────────────────
+
+_CIA_VOCAB = {
+    # Setup names
+    r"\bkame\b": "kamehameha volume ledakan",
+    r"\bkamehameha\b": "kamehameha volume ledakan breakout besar",
+    r"\bsuperketat\b": "superketat semua MA rapat entry terbaik",
+    r"\bketat\b": "ketat MA rapat tren mulai",
+    r"\brainbow\b": "rainbow di atas semua MA no resistance",
+    r"\bstar\b": "star setup premium ketat kamehameha",
+    r"\bsunflower\b": "sunflower breakout gap pertama",
+    r"\bara\b": "ARA auto rejection atas naik 20 persen",
+    r"\barb\b": "ARB auto rejection bawah turun 20 persen",
+    # Common CIA slang
+    r"\bbandar\b": "bandar big player akumulasi institusi",
+    r"\bbreakout\b": "breakout tembus resistance naik",
+    r"\bkonsolidasi\b": "konsolidasi sideways range",
+    r"\baccu\b": "akumulasi beli bertahap",
+    r"\bdistri\b": "distribusi jual bertahap",
+    r"\bpow\b": "power of will naik kuat",
+    # Volume
+    r"\bvol\b": "volume transaksi",
+    r"\bv60\b": "V60 rata rata volume 60 hari",
+    # TA terms
+    r"\bma\b": "moving average",
+    r"\brsi\b": "RSI relative strength index",
+    r"\bmacd\b": "MACD momentum",
+    r"\bbb\b": "bollinger bands",
+    r"\bsr\b": "support resistance",
+    r"\bema\b": "EMA exponential moving average",
+}
+
+
+def _expand_cia_query(text: str) -> str:
+    """Expand CIA trading vocabulary before embedding to improve similarity scores."""
+    text_lower = text.lower()
+    expansions = []
+    for pattern, expansion in _CIA_VOCAB.items():
+        if re.search(pattern, text_lower, re.IGNORECASE):
+            expansions.append(expansion)
+    if expansions:
+        return text + " " + " ".join(expansions)
+    return text
 
 
 def _get_resources():
@@ -112,7 +157,8 @@ def index_message(
 
         # Cek apakah sudah ada (upsert by msg_id)
         doc_id = str(msg_id)
-        embedding = model.encode([text], normalize_embeddings=True)[0].tolist()
+        embed_text = _expand_cia_query(text) if len(text) < 200 else text
+        embedding = model.encode([embed_text], normalize_embeddings=True)[0].tolist()
 
         col.upsert(
             ids=[doc_id],
@@ -187,8 +233,9 @@ def semantic_search(
             {"$and": where_clauses} if len(where_clauses) > 1 else None
         )
 
-        # Embed query
-        q_embedding = model.encode([query], normalize_embeddings=True)[0].tolist()
+        # Embed query (with CIA vocab expansion)
+        expanded_query = _expand_cia_query(query)
+        q_embedding = model.encode([expanded_query], normalize_embeddings=True)[0].tolist()
 
         # Query ChromaDB
         kwargs = dict(
@@ -244,9 +291,10 @@ def semantic_search(
                     ticker_counter[t] += 1
 
         return {
-            "success":      True,
-            "query":        query,
-            "total_vectors": col.count(),
+            "success":        True,
+            "query":          query,
+            "query_expanded": expanded_query if expanded_query != query else None,
+            "total_vectors":  col.count(),
             "results_found": len(hits),
             "top_tickers":  [{"ticker": t, "mentions": c} for t, c in ticker_counter.most_common(10)],
             "results":      hits,
