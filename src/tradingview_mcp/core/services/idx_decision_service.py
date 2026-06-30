@@ -435,6 +435,329 @@ def _fetch_bandar_signal(ticker: str, period: str = "3mo") -> dict:
         return {"available": False, "error": f"Kalkulasi gagal: {e}"}
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# HELPERS — Multi-Timeframe (MTF) Confluence
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _calc_rsi_series(closes: "pd.Series", period: int = 14) -> float:
+    """Compute RSI from a Close price Series. Returns last value."""
+    delta = closes.diff()
+    gain = delta.clip(lower=0)
+    loss = (-delta).clip(lower=0)
+    avg_gain = gain.ewm(com=period - 1, min_periods=period).mean()
+    avg_loss = loss.ewm(com=period - 1, min_periods=period).mean()
+    rs = avg_gain / (avg_loss + 1e-9)
+    rsi = 100 - (100 / (1 + rs))
+    return float(rsi.iloc[-1])
+
+
+def _calc_macd_signal(closes: "pd.Series") -> str:
+    """Returns 'bullish' if MACD line > Signal line, else 'bearish'."""
+    ema12 = closes.ewm(span=12, adjust=False).mean()
+    ema26 = closes.ewm(span=26, adjust=False).mean()
+    macd_line = ema12 - ema26
+    signal_line = macd_line.ewm(span=9, adjust=False).mean()
+    return "bullish" if float(macd_line.iloc[-1]) > float(signal_line.iloc[-1]) else "bearish"
+
+
+def _fetch_mtf_confluence(ticker: str) -> dict:
+    """
+    Fetch weekly OHLCV via yfinance and compute MTF confluence.
+
+    Returns dict with keys: daily, weekly, confluence.
+    Falls back gracefully on any error.
+    """
+    if not _YF_AVAILABLE:
+        return {"available": False, "error": "yfinance tidak terinstall"}
+
+    yf_tick = _yf_ticker(ticker)
+
+    # ── Weekly data ────────────────────────────────────────────────────────────
+    try:
+        hist_w = yf.download(yf_tick, interval="1wk", period="1y",
+                             progress=False, auto_adjust=True)
+        if isinstance(hist_w.columns, pd.MultiIndex):
+            hist_w.columns = hist_w.columns.get_level_values(0)
+    except Exception as e:
+        return {"available": False, "error": f"Weekly fetch gagal: {e}"}
+
+    if hist_w is None or len(hist_w) < 20:
+        return {"available": False, "error": "Data mingguan tidak cukup"}
+
+    # ── Daily data (for daily signals — re-use bandar hist if possible) ────────
+    try:
+        hist_d = yf.download(yf_tick, interval="1d", period="6mo",
+                             progress=False, auto_adjust=True)
+        if isinstance(hist_d.columns, pd.MultiIndex):
+            hist_d.columns = hist_d.columns.get_level_values(0)
+    except Exception as e:
+        return {"available": False, "error": f"Daily fetch gagal: {e}"}
+
+    if hist_d is None or len(hist_d) < 20:
+        return {"available": False, "error": "Data harian tidak cukup"}
+
+    try:
+        # ── Weekly signals ─────────────────────────────────────────────────────
+        close_w = hist_w["Close"]
+        sma20w = float(close_w.rolling(20, min_periods=10).mean().iloc[-1])
+        price_w = float(close_w.iloc[-1])
+        weekly_trend = "bullish" if price_w > sma20w else "bearish"
+
+        rsi_w = _calc_rsi_series(close_w, period=14)
+        if rsi_w > 55:
+            weekly_rsi_bias = "bullish"
+        elif rsi_w < 45:
+            weekly_rsi_bias = "bearish"
+        else:
+            weekly_rsi_bias = "neutral"
+
+        weekly_macd = _calc_macd_signal(close_w)
+
+        weekly_bull = sum([weekly_trend == "bullish",
+                           weekly_rsi_bias == "bullish",
+                           weekly_macd == "bullish"])
+        weekly_bear = sum([weekly_trend == "bearish",
+                           weekly_rsi_bias == "bearish",
+                           weekly_macd == "bearish"])
+
+        if weekly_bull >= 2:
+            weekly_bias = "bullish"
+        elif weekly_bear >= 2:
+            weekly_bias = "bearish"
+        else:
+            weekly_bias = "neutral"
+
+        # ── Daily signals ──────────────────────────────────────────────────────
+        close_d = hist_d["Close"]
+        sma20d = float(close_d.rolling(20, min_periods=10).mean().iloc[-1])
+        price_d = float(close_d.iloc[-1])
+        daily_trend = "bullish" if price_d > sma20d else "bearish"
+
+        rsi_d = _calc_rsi_series(close_d, period=14)
+        if rsi_d > 55:
+            daily_rsi_bias = "bullish"
+        elif rsi_d < 45:
+            daily_rsi_bias = "bearish"
+        else:
+            daily_rsi_bias = "neutral"
+
+        daily_macd = _calc_macd_signal(close_d)
+
+        daily_bull = sum([daily_trend == "bullish",
+                          daily_rsi_bias == "bullish",
+                          daily_macd == "bullish"])
+        daily_bear = sum([daily_trend == "bearish",
+                          daily_rsi_bias == "bearish",
+                          daily_macd == "bearish"])
+
+        if daily_bull >= 2:
+            daily_bias = "bullish"
+        elif daily_bear >= 2:
+            daily_bias = "bearish"
+        else:
+            daily_bias = "neutral"
+
+        # ── Confluence label ───────────────────────────────────────────────────
+        if daily_bias == "bullish" and weekly_bias == "bullish":
+            confluence = "STRONG_BULL"
+        elif daily_bias == "bullish" and weekly_bias == "neutral":
+            confluence = "BULL"
+        elif daily_bias == "neutral" and weekly_bias == "bullish":
+            confluence = "BULL"
+        elif daily_bias == "bearish" and weekly_bias == "bearish":
+            confluence = "STRONG_BEAR"
+        elif daily_bias == "bearish" and weekly_bias == "neutral":
+            confluence = "BEAR"
+        elif daily_bias == "neutral" and weekly_bias == "bearish":
+            confluence = "BEAR"
+        else:
+            confluence = "MIXED"
+
+        return {
+            "available": True,
+            "daily": daily_bias,
+            "weekly": weekly_bias,
+            "confluence": confluence,
+            "detail": {
+                "daily_trend_vs_sma20": daily_trend,
+                "daily_rsi": round(rsi_d, 1),
+                "daily_rsi_bias": daily_rsi_bias,
+                "daily_macd": daily_macd,
+                "weekly_trend_vs_sma20w": weekly_trend,
+                "weekly_rsi": round(rsi_w, 1),
+                "weekly_rsi_bias": weekly_rsi_bias,
+                "weekly_macd": weekly_macd,
+                "weekly_price": round(price_w, 0),
+                "weekly_sma20": round(sma20w, 0),
+            },
+        }
+
+    except Exception as e:
+        return {"available": False, "error": f"MTF kalkulasi gagal: {e}"}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# HELPERS — Support & Resistance Levels
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _fetch_support_resistance(ticker: str, current_price: float) -> dict:
+    """
+    Calculate S/R levels from daily OHLCV:
+      S1 = lowest low of last 20 bars
+      S2 = lowest low of last 50 bars
+      R1 = highest high of last 20 bars
+      R2 = highest high of last 50 bars
+    """
+    if not _YF_AVAILABLE:
+        return {"available": False, "error": "yfinance tidak terinstall"}
+
+    yf_tick = _yf_ticker(ticker)
+    try:
+        hist = yf.download(yf_tick, interval="1d", period="6mo",
+                           progress=False, auto_adjust=True)
+        if isinstance(hist.columns, pd.MultiIndex):
+            hist.columns = hist.columns.get_level_values(0)
+    except Exception as e:
+        return {"available": False, "error": str(e)}
+
+    if hist is None or len(hist) < 20:
+        return {"available": False, "error": "Data tidak cukup untuk S/R"}
+
+    try:
+        lows  = hist["Low"]
+        highs = hist["High"]
+
+        s1 = float(lows.iloc[-20:].min())
+        s2 = float(lows.iloc[-50:].min()) if len(lows) >= 50 else float(lows.min())
+        r1 = float(highs.iloc[-20:].max())
+        r2 = float(highs.iloc[-50:].max()) if len(highs) >= 50 else float(highs.max())
+
+        price = current_price if current_price and current_price > 0 else float(hist["Close"].iloc[-1])
+
+        dist_s1_pct = round(((price - s1) / s1) * 100, 2) if s1 > 0 else None
+        dist_r1_pct = round(((r1 - price) / price) * 100, 2) if price > 0 else None
+
+        # SR position
+        near_s1 = dist_s1_pct is not None and dist_s1_pct <= 3.0
+        near_r1 = dist_r1_pct is not None and dist_r1_pct <= 3.0
+
+        if near_s1:
+            sr_position = "NEAR_SUPPORT"
+        elif near_r1:
+            sr_position = "NEAR_RESISTANCE"
+        else:
+            sr_position = "MID_RANGE"
+
+        return {
+            "available": True,
+            "s1": round(s1, 0),
+            "s2": round(s2, 0),
+            "r1": round(r1, 0),
+            "r2": round(r2, 0),
+            "distance_to_s1_pct": dist_s1_pct,
+            "distance_to_r1_pct": dist_r1_pct,
+            "sr_position": sr_position,
+            "bars_used": len(hist),
+        }
+
+    except Exception as e:
+        return {"available": False, "error": f"S/R kalkulasi gagal: {e}"}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# HELPERS — News Sentiment (lightweight via yfinance)
+# ══════════════════════════════════════════════════════════════════════════════
+
+_BULLISH_KEYWORDS = {
+    "upgrade", "buy", "growth", "profit", "record", "positive",
+    "outperform", "strong", "bullish", "rally", "gain", "rise",
+    "increase", "beat", "surplus", "acquisition", "expand",
+}
+_BEARISH_KEYWORDS = {
+    "downgrade", "sell", "loss", "concern", "drop", "risk", "warning",
+    "underperform", "weak", "bearish", "decline", "fall", "decrease",
+    "miss", "deficit", "layoff", "fraud", "investigation",
+}
+
+
+def _fetch_news_sentiment(ticker: str) -> dict:
+    """
+    Fetch recent news from yfinance and compute simple keyword sentiment.
+    Returns dict with headline_count, bullish_signals, bearish_signals,
+    sentiment (POSITIVE/NEGATIVE/NEUTRAL), and recent_headlines.
+    """
+    if not _YF_AVAILABLE:
+        return {"available": False, "error": "yfinance tidak terinstall"}
+
+    yf_tick = _yf_ticker(ticker)
+    try:
+        yf_obj = yf.Ticker(yf_tick)
+        news_items = yf_obj.news or []
+    except Exception as e:
+        return {"available": False, "error": f"News fetch gagal: {e}"}
+
+    if not news_items:
+        return {
+            "available": True,
+            "headline_count": 0,
+            "bullish_signals": 0,
+            "bearish_signals": 0,
+            "sentiment": "NEUTRAL",
+            "recent_headlines": [],
+        }
+
+    # Limit to last 10 items
+    news_items = news_items[:10]
+
+    bullish_count = 0
+    bearish_count = 0
+    headlines = []
+
+    for item in news_items:
+        # yfinance news structure varies; handle both old and new format
+        title = ""
+        if isinstance(item, dict):
+            # Try nested content structure (newer yfinance)
+            content = item.get("content", {})
+            if isinstance(content, dict):
+                title = content.get("title", "") or content.get("summary", "")
+            if not title:
+                title = item.get("title", "") or item.get("headline", "")
+
+        if not title:
+            continue
+
+        headlines.append(title)
+        lower = title.lower()
+
+        for kw in _BULLISH_KEYWORDS:
+            if kw in lower:
+                bullish_count += 1
+                break
+
+        for kw in _BEARISH_KEYWORDS:
+            if kw in lower:
+                bearish_count += 1
+                break
+
+    # Overall sentiment
+    if bullish_count > bearish_count and bullish_count >= 2:
+        sentiment = "POSITIVE"
+    elif bearish_count > bullish_count and bearish_count >= 2:
+        sentiment = "NEGATIVE"
+    else:
+        sentiment = "NEUTRAL"
+
+    return {
+        "available": True,
+        "headline_count": len(headlines),
+        "bullish_signals": bullish_count,
+        "bearish_signals": bearish_count,
+        "sentiment": sentiment,
+        "recent_headlines": headlines[:3],
+    }
+
+
 def _idr_liquidity_check(avg_vol: float, close: float) -> dict:
     """
     IDR-calibrated liquidity assessment.
@@ -578,6 +901,15 @@ def get_idx_stock_decision(ticker: str, timeframe: str = "1D") -> dict:
     # ── 4. Layer E: Bandarmology signal ───────────────────────────────────────
     bandar = _fetch_bandar_signal(clean, period="3mo")
 
+    # ── 4b. MTF Confluence ────────────────────────────────────────────────────
+    mtf = _fetch_mtf_confluence(clean)
+
+    # ── 4c. Support & Resistance ──────────────────────────────────────────────
+    sr = _fetch_support_resistance(clean, current_price=close)
+
+    # ── 4d. News Sentiment ────────────────────────────────────────────────────
+    news_sent = _fetch_news_sentiment(clean)
+
     bandar_adj = 0
     if bandar.get("available"):
         bandar_adj = bandar.get("score_adjustment", 0)
@@ -653,6 +985,23 @@ def get_idx_stock_decision(ticker: str, timeframe: str = "1D") -> dict:
                 decision   = "HOLD"
                 confidence = "LOW"
                 rec        = "DOWNGRADED — Bandar signal sangat bearish, tahan dulu"
+
+    # ── MTF confluence adjustments ────────────────────────────────────────────
+    mtf_confluence = mtf.get("confluence") if mtf.get("available") else None
+    if mtf_confluence == "STRONG_BULL" and decision == "BUY" and confidence == "MODERATE":
+        confidence = "HIGH"
+        rec = rec + " | MTF STRONG_BULL: konfirmasi weekly"
+    elif mtf_confluence == "MIXED":
+        rec = rec + " | MTF CONFLICT: daily vs weekly berbeda arah"
+        if decision == "BUY" and confidence == "HIGH":
+            confidence = "MODERATE"
+
+    # ── S/R position note ─────────────────────────────────────────────────────
+    sr_pos = sr.get("sr_position") if sr.get("available") else None
+    if sr_pos == "NEAR_RESISTANCE" and decision == "BUY":
+        rec = rec + " | RISIKO: harga dekat resistance (R1)"
+    elif sr_pos == "NEAR_SUPPORT":
+        rec = rec + " | PELUANG: harga dekat support (S1)"
 
     # ── 8. Extended indicators ────────────────────────────────────────────────
     extended = extract_extended_indicators(ind)
@@ -768,6 +1117,28 @@ def get_idx_stock_decision(ticker: str, timeframe: str = "1D") -> dict:
 
         # Layer F: CIA Setup (Chronic Investor Academy)
         "cia_setup": cia_context,
+
+        # Layer G: Multi-Timeframe Confluence
+        "mtf_confluence": {
+            "daily"      : mtf.get("daily"),
+            "weekly"     : mtf.get("weekly"),
+            "confluence" : mtf.get("confluence"),
+            "detail"     : mtf.get("detail"),
+            "available"  : mtf.get("available", False),
+            "error"      : mtf.get("error"),
+        } if not mtf.get("available") else {
+            "daily"      : mtf["daily"],
+            "weekly"     : mtf["weekly"],
+            "confluence" : mtf["confluence"],
+            "detail"     : mtf.get("detail", {}),
+            "available"  : True,
+        },
+
+        # Layer H: Support & Resistance
+        "support_resistance": sr,
+
+        # Layer I: News Sentiment
+        "news_sentiment": news_sent,
     }
 
     # Trade setup (hanya jika score cukup)
