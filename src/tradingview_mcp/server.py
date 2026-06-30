@@ -64,6 +64,8 @@ from tradingview_mcp.core.services.backtest_service import (
     run_backtest,
     compare_strategies as _compare_strategies,
     walk_forward_backtest,
+    run_cia_backtest as _run_cia_backtest,
+    compare_cia_strategies as _compare_cia_strategies,
 )
 from tradingview_mcp.core.services.idx_fundamental_service import screen_idx_fundamental
 from tradingview_mcp.core.services.idx_decision_service import get_idx_stock_decision
@@ -847,6 +849,115 @@ def walk_forward_backtest_strategy(
     return walk_forward_backtest(
         symbol, strategy, period, initial_capital,
         commission_pct, slippage_pct, n_splits, train_ratio, interval,
+    )
+
+
+@mcp.tool()
+def backtest_cia_strategy(
+    symbol: str,
+    strategy: str = "cia_ketat",
+    period: str = "1y",
+    initial_capital: float = 10_000_000.0,
+    commission_buy_pct: float = 0.15,
+    commission_sell_pct: float = 0.25,
+    slippage_pct: float = 0.05,
+    tight_pct: float = 5.0,
+    kamehameha_ratio: float = 2.5,
+    ara_guard: bool = True,
+    ara_arb_simulation: bool = True,
+    include_trade_log: bool = False,
+    include_equity_curve: bool = False,
+) -> dict:
+    """Backtest satu CIA trading setup pada saham IDX.
+
+    Mensimulasikan trading CIA style dengan aturan real IDX:
+      - ARA guard: tidak entry kalau candle sudah kena auto-rejection +20%
+      - ARB simulation: force exit kalau harga kena floor -20%
+      - Komisi IDX: buy (0.15%) + sell (0.25%) terpisah (bukan flat %)
+
+    Args:
+        symbol:              Kode saham IDX, contoh: "BBCA", "TLKM", "GOTO"
+                             (auto-append .JK untuk Yahoo Finance)
+        strategy:            cia_superketat | cia_ketat | cia_kamehameha |
+                             cia_rainbow | cia_star | cia_sunflower
+        period:              1mo | 3mo | 6mo | 1y | 2y
+        initial_capital:     Modal awal dalam IDR (default 10 juta)
+        commission_buy_pct:  Komisi beli % (default 0.15%)
+        commission_sell_pct: Komisi jual % (default 0.25%)
+        slippage_pct:        Slippage per sisi % (default 0.05%)
+        tight_pct:           Batas jarak % ke MA untuk kondisi "ketat" (default 5%)
+        kamehameha_ratio:    Min volume vs V60 untuk Kamehameha (default 2.5×)
+        ara_guard:           Skip entry di hari ARA (default True)
+        ara_arb_simulation:  Force exit di level ARB kalau kena (default True)
+        include_trade_log:   Sertakan log per trade lengkap
+        include_equity_curve: Sertakan data equity curve
+    """
+    return _run_cia_backtest(
+        symbol=symbol,
+        strategy=strategy,
+        period=period,
+        initial_capital=initial_capital,
+        commission_buy_pct=commission_buy_pct,
+        commission_sell_pct=commission_sell_pct,
+        slippage_pct=slippage_pct,
+        tight_pct=tight_pct,
+        kamehameha_ratio=kamehameha_ratio,
+        ara_guard=ara_guard,
+        ara_arb_simulation=ara_arb_simulation,
+        include_trade_log=include_trade_log,
+        include_equity_curve=include_equity_curve,
+    )
+
+
+@mcp.tool()
+def compare_cia_strategies(
+    symbol: str,
+    period: str = "1y",
+    initial_capital: float = 10_000_000.0,
+    commission_buy_pct: float = 0.15,
+    commission_sell_pct: float = 0.25,
+    slippage_pct: float = 0.05,
+    tight_pct: float = 5.0,
+    kamehameha_ratio: float = 2.5,
+    ara_guard: bool = True,
+    ara_arb_simulation: bool = True,
+) -> dict:
+    """Jalankan semua 6 strategi CIA pada satu saham IDX dan ranking berdasarkan performa.
+
+    Berguna untuk mengetahui setup CIA mana yang paling efektif untuk saham tertentu.
+    Hasilnya diurutkan dari total return tertinggi.
+
+    CIA setups yang dibandingkan:
+      cia_superketat  — close > MA5/10/20 semua dalam 5% (AND condition)
+      cia_ketat       — close > MA5/10/20, minimal satu dalam 5% (OR condition)
+      cia_kamehameha  — volume > 2.5× V60 dan close > MA20
+      cia_rainbow     — close di atas semua MA (5/10/20/50/100/200)
+      cia_star        — Ketat + Kamehameha bersamaan (setup premium)
+      cia_sunflower   — Ketat pertama setelah gap up
+
+    Args:
+        symbol:              Kode saham IDX, contoh: "BBCA", "TLKM"
+        period:              1mo | 3mo | 6mo | 1y | 2y
+        initial_capital:     Modal awal dalam IDR (default 10 juta)
+        commission_buy_pct:  Komisi beli % (default 0.15%)
+        commission_sell_pct: Komisi jual % (default 0.25%)
+        slippage_pct:        Slippage per sisi % (default 0.05%)
+        tight_pct:           Batas jarak % ke MA (default 5%)
+        kamehameha_ratio:    Volume multiplier vs V60 (default 2.5×)
+        ara_guard:           Skip entry di hari ARA (default True)
+        ara_arb_simulation:  Simulasi ARB force exit (default True)
+    """
+    return _compare_cia_strategies(
+        symbol=symbol,
+        period=period,
+        initial_capital=initial_capital,
+        commission_buy_pct=commission_buy_pct,
+        commission_sell_pct=commission_sell_pct,
+        slippage_pct=slippage_pct,
+        tight_pct=tight_pct,
+        kamehameha_ratio=kamehameha_ratio,
+        ara_guard=ara_guard,
+        ara_arb_simulation=ara_arb_simulation,
     )
 
 

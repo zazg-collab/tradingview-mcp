@@ -1,16 +1,21 @@
 """
-Backtesting Service for tradingview-mcp — v3 (v0.7.0)
+Backtesting Service for tradingview-mcp — v4 (v0.8.0)
 
 Pure Python — no pandas, no numpy, no external backtesting libraries.
 
-Supported strategies (6):
-  rsi, bollinger, macd, ema_cross, supertrend, donchian
+Supported strategies (9 generic + 6 CIA-specific):
+  Generic: rsi, bollinger, macd, ema_cross, supertrend, donchian,
+           rsi_pullback, keltner_breakout, triple_ema
+  CIA IDX: cia_superketat, cia_ketat, cia_kamehameha, cia_rainbow,
+           cia_star, cia_sunflower
 
-v0.7.0 additions:
-  - 1h (hourly) timeframe support
-  - Full trade log with per-trade detail
-  - Equity curve data points
-  - Walk-forward backtesting (overfitting detection)
+v0.8.0 additions (CIA-specific):
+  - 6 CIA trading setup strategies (MA-based, IDX style)
+  - ARA/ARB price limit simulation (IDX ±20% auto-rejection)
+  - V60 (60-day average volume) for Kamehameha detection
+  - IDX broker commission structure (buy/sell separate)
+  - run_cia_backtest() public API
+  - compare_cia_strategies() public API
 """
 from __future__ import annotations
 
@@ -291,6 +296,376 @@ _STRATEGY_MAP = {
 }
 
 
+# ─── CIA-Specific Strategies (IDX) ───────────────────────────────────────────
+
+_CIA_STRATEGY_LABELS = {
+    "cia_superketat":   "CIA Superketat (close > MA5/10/20 semua ≤5%) — entry terbaik",
+    "cia_ketat":        "CIA Ketat (close > MA5/10/20, salah satu ≤5%) — konfirmasi tren",
+    "cia_kamehameha":   "CIA Kamehameha (volume > 2.5× V60, close > MA20) — ledakan volume",
+    "cia_rainbow":      "CIA Rainbow (close > MA5/10/20/50/100/200) — no resistance",
+    "cia_star":         "CIA Star (Ketat + Kamehameha bersamaan) — setup premium",
+    "cia_sunflower":    "CIA Sunflower (Ketat pertama setelah gap up) — breakout gap",
+}
+
+
+def _calc_v60(volumes: list, period: int = 60) -> list:
+    """Simple moving average of volume (V60 baseline for Kamehameha)."""
+    result = [None] * len(volumes)
+    for i in range(period - 1, len(volumes)):
+        total = sum(volumes[i - period + 1 : i + 1])
+        result[i] = total / period if total > 0 else None
+    return result
+
+
+def _pct_above(close: float, ma) -> float:
+    """Percentage distance of close above MA. Returns inf if MA is None/0."""
+    if ma is None or ma == 0:
+        return float("inf")
+    return (close - ma) / ma * 100
+
+
+def _is_above(close: float, ma) -> bool:
+    return ma is not None and close > ma
+
+
+def _gap_up(candles: list, i: int) -> bool:
+    """True if bar i opens above bar i-1's high (gap up)."""
+    if i < 1:
+        return False
+    return candles[i]["low"] > candles[i - 1]["high"]
+
+
+def _run_cia_superketat(candles, tight_pct=5.0, ara_guard=True, **_):
+    """Entry: close > MA5/MA10/MA20 AND all distances ≤ tight_pct%.
+    Exit: close < MA5 (CL) or position open at end."""
+    closes = [c["close"] for c in candles]
+    ma5    = calc_sma(closes, 5)
+    ma10   = calc_sma(closes, 10)
+    ma20   = calc_sma(closes, 20)
+    trades, position = [], None
+    prev_close = None
+    for i in range(1, len(candles)):
+        if ma20[i] is None:
+            prev_close = candles[i]["close"]
+            continue
+        price, date = candles[i]["close"], candles[i]["date"]
+        d5  = _pct_above(price, ma5[i])
+        d10 = _pct_above(price, ma10[i])
+        d20 = _pct_above(price, ma20[i])
+        in_ara = (ara_guard and prev_close is not None and
+                  candles[i]["high"] >= prev_close * 1.20)
+        entry_ok = (d5 >= 0 and d10 >= 0 and d20 >= 0 and
+                    d5 <= tight_pct and d10 <= tight_pct and d20 <= tight_pct and
+                    not in_ara)
+        exit_ok  = position is not None and ma5[i] is not None and price < ma5[i]
+        if position is None and entry_ok:
+            position = {"entry_date": date, "entry_price": price,
+                        "strategy": "cia_superketat",
+                        "setup_note": f"MA5:{d5:.1f}% MA10:{d10:.1f}% MA20:{d20:.1f}%"}
+        elif exit_ok:
+            trades.append({**position, "exit_date": date, "exit_price": price,
+                           "exit_reason": "CL: close < MA5"})
+            position = None
+        prev_close = price
+    return trades
+
+
+def _run_cia_ketat(candles, tight_pct=5.0, ara_guard=True, **_):
+    """Entry: close > MA5/MA10/MA20 AND at least one distance ≤ tight_pct%.
+    Exit: close < MA5 (CL)."""
+    closes = [c["close"] for c in candles]
+    ma5    = calc_sma(closes, 5)
+    ma10   = calc_sma(closes, 10)
+    ma20   = calc_sma(closes, 20)
+    trades, position = [], None
+    prev_close = None
+    for i in range(1, len(candles)):
+        if ma20[i] is None:
+            prev_close = candles[i]["close"]
+            continue
+        price, date = candles[i]["close"], candles[i]["date"]
+        d5  = _pct_above(price, ma5[i])
+        d10 = _pct_above(price, ma10[i])
+        d20 = _pct_above(price, ma20[i])
+        above_all = d5 >= 0 and d10 >= 0 and d20 >= 0
+        any_tight = min(d5, d10, d20) <= tight_pct
+        in_ara = (ara_guard and prev_close is not None and
+                  candles[i]["high"] >= prev_close * 1.20)
+        entry_ok = above_all and any_tight and not in_ara
+        exit_ok  = position is not None and ma5[i] is not None and price < ma5[i]
+        if position is None and entry_ok:
+            position = {"entry_date": date, "entry_price": price,
+                        "strategy": "cia_ketat",
+                        "setup_note": f"MA5:{d5:.1f}% MA10:{d10:.1f}% MA20:{d20:.1f}%"}
+        elif exit_ok:
+            trades.append({**position, "exit_date": date, "exit_price": price,
+                           "exit_reason": "CL: close < MA5"})
+            position = None
+        prev_close = price
+    return trades
+
+
+def _run_cia_kamehameha(candles, kamehameha_ratio=2.5, ara_guard=True, **_):
+    """Entry: volume > kamehameha_ratio × V60 AND close > MA20.
+    Exit: close < MA10 (CL) — allow more room since it's a vol spike play."""
+    closes  = [c["close"]  for c in candles]
+    volumes = [c["volume"] for c in candles]
+    ma10    = calc_sma(closes, 10)
+    ma20    = calc_sma(closes, 20)
+    v60     = _calc_v60(volumes, 60)
+    trades, position = [], None
+    prev_close = None
+    for i in range(1, len(candles)):
+        if ma20[i] is None or v60[i] is None:
+            prev_close = candles[i]["close"]
+            continue
+        price, date  = candles[i]["close"], candles[i]["date"]
+        vol          = candles[i]["volume"]
+        is_kame      = v60[i] > 0 and vol >= kamehameha_ratio * v60[i]
+        above_ma20   = price > ma20[i]
+        in_ara = (ara_guard and prev_close is not None and
+                  candles[i]["high"] >= prev_close * 1.20)
+        entry_ok = is_kame and above_ma20 and not in_ara
+        exit_ok  = position is not None and ma10[i] is not None and price < ma10[i]
+        vol_ratio = round(vol / v60[i], 2) if v60[i] else 0
+        if position is None and entry_ok:
+            position = {"entry_date": date, "entry_price": price,
+                        "strategy": "cia_kamehameha",
+                        "setup_note": f"Vol {vol_ratio}× V60"}
+        elif exit_ok:
+            trades.append({**position, "exit_date": date, "exit_price": price,
+                           "exit_reason": "CL: close < MA10"})
+            position = None
+        prev_close = price
+    return trades
+
+
+def _run_cia_rainbow(candles, ara_guard=True, **_):
+    """Entry: close above ALL 6 MAs (5/10/20/50/100/200).
+    Exit: close < MA20 (CL) — wide stop since long-term strength required."""
+    closes = [c["close"] for c in candles]
+    ma5    = calc_sma(closes, 5)
+    ma10   = calc_sma(closes, 10)
+    ma20   = calc_sma(closes, 20)
+    ma50   = calc_sma(closes, 50)
+    ma100  = calc_sma(closes, 100)
+    ma200  = calc_sma(closes, 200)
+    trades, position = [], None
+    prev_close = None
+    for i in range(1, len(candles)):
+        if ma200[i] is None:
+            prev_close = candles[i]["close"]
+            continue
+        price, date = candles[i]["close"], candles[i]["date"]
+        in_ara = (ara_guard and prev_close is not None and
+                  candles[i]["high"] >= prev_close * 1.20)
+        above_all = all(_is_above(price, m[i]) for m in (ma5, ma10, ma20, ma50, ma100, ma200))
+        entry_ok  = above_all and not in_ara
+        exit_ok   = position is not None and ma20[i] is not None and price < ma20[i]
+        if position is None and entry_ok:
+            position = {"entry_date": date, "entry_price": price,
+                        "strategy": "cia_rainbow",
+                        "setup_note": "Above MA5/10/20/50/100/200"}
+        elif exit_ok:
+            trades.append({**position, "exit_date": date, "exit_price": price,
+                           "exit_reason": "CL: close < MA20"})
+            position = None
+        prev_close = price
+    return trades
+
+
+def _run_cia_star(candles, tight_pct=5.0, kamehameha_ratio=2.5, ara_guard=True, **_):
+    """Entry: KETAT condition AND KAMEHAMEHA condition simultaneously.
+    Exit: close < MA5 (CL) — tightest stop, premium setup."""
+    closes  = [c["close"]  for c in candles]
+    volumes = [c["volume"] for c in candles]
+    ma5     = calc_sma(closes, 5)
+    ma10    = calc_sma(closes, 10)
+    ma20    = calc_sma(closes, 20)
+    v60     = _calc_v60(volumes, 60)
+    trades, position = [], None
+    prev_close = None
+    for i in range(1, len(candles)):
+        if ma20[i] is None or v60[i] is None:
+            prev_close = candles[i]["close"]
+            continue
+        price, date = candles[i]["close"], candles[i]["date"]
+        vol  = candles[i]["volume"]
+        d5   = _pct_above(price, ma5[i])
+        d10  = _pct_above(price, ma10[i])
+        d20  = _pct_above(price, ma20[i])
+        ketat_ok = (d5 >= 0 and d10 >= 0 and d20 >= 0 and min(d5, d10, d20) <= tight_pct)
+        kame_ok  = v60[i] > 0 and vol >= kamehameha_ratio * v60[i]
+        in_ara   = (ara_guard and prev_close is not None and
+                    candles[i]["high"] >= prev_close * 1.20)
+        entry_ok = ketat_ok and kame_ok and not in_ara
+        exit_ok  = position is not None and ma5[i] is not None and price < ma5[i]
+        vol_ratio = round(vol / v60[i], 2) if v60[i] else 0
+        if position is None and entry_ok:
+            position = {"entry_date": date, "entry_price": price,
+                        "strategy": "cia_star",
+                        "setup_note": f"Ketat MA5:{d5:.1f}% + Kame {vol_ratio}×V60"}
+        elif exit_ok:
+            trades.append({**position, "exit_date": date, "exit_price": price,
+                           "exit_reason": "CL: close < MA5"})
+            position = None
+        prev_close = price
+    return trades
+
+
+def _run_cia_sunflower(candles, tight_pct=5.0, ara_guard=True, **_):
+    """Entry: first KETAT bar immediately after a gap up (low[i] > high[i-1]).
+    Exit: close < MA5 (CL)."""
+    closes = [c["close"] for c in candles]
+    ma5    = calc_sma(closes, 5)
+    ma10   = calc_sma(closes, 10)
+    ma20   = calc_sma(closes, 20)
+    trades, position = [], None
+    prev_close = None
+    for i in range(1, len(candles)):
+        if ma20[i] is None:
+            prev_close = candles[i]["close"]
+            continue
+        price, date = candles[i]["close"], candles[i]["date"]
+        d5   = _pct_above(price, ma5[i])
+        d10  = _pct_above(price, ma10[i])
+        d20  = _pct_above(price, ma20[i])
+        ketat_ok  = (d5 >= 0 and d10 >= 0 and d20 >= 0 and min(d5, d10, d20) <= tight_pct)
+        gap_ok    = _gap_up(candles, i)
+        in_ara    = (ara_guard and prev_close is not None and
+                     candles[i]["high"] >= prev_close * 1.20)
+        entry_ok  = ketat_ok and gap_ok and not in_ara
+        exit_ok   = position is not None and ma5[i] is not None and price < ma5[i]
+        if position is None and entry_ok:
+            position = {"entry_date": date, "entry_price": price,
+                        "strategy": "cia_sunflower",
+                        "setup_note": f"Gap up + Ketat MA5:{d5:.1f}%"}
+        elif exit_ok:
+            trades.append({**position, "exit_date": date, "exit_price": price,
+                           "exit_reason": "CL: close < MA5"})
+            position = None
+        prev_close = price
+    return trades
+
+
+_CIA_STRATEGY_MAP = {
+    "cia_superketat":  _run_cia_superketat,
+    "cia_ketat":       _run_cia_ketat,
+    "cia_kamehameha":  _run_cia_kamehameha,
+    "cia_rainbow":     _run_cia_rainbow,
+    "cia_star":        _run_cia_star,
+    "cia_sunflower":   _run_cia_sunflower,
+}
+
+# IDX default commission: 0.15% buy + 0.25% sell (typical broker Indonesia)
+_IDX_COMMISSION_BUY  = 0.15
+_IDX_COMMISSION_SELL = 0.25
+
+
+def _apply_idx_costs(trades: list, commission_buy_pct: float,
+                     commission_sell_pct: float, slippage_pct: float) -> list:
+    """Apply separate buy/sell commission (IDX structure) + slippage."""
+    result = []
+    for t in trades:
+        gross = (t["exit_price"] - t["entry_price"]) / t["entry_price"] * 100
+        cost  = commission_buy_pct + commission_sell_pct + slippage_pct * 2
+        net   = round(gross - cost, 3)
+        result.append({**t, "return_pct": net, "gross_return_pct": round(gross, 3),
+                        "cost_pct": round(-cost, 3)})
+    return result
+
+
+def _apply_arb_guard(trades: list, candles: list,
+                     ara_limit: float = 0.20, arb_limit: float = 0.20) -> list:
+    """Post-process trades: force exit if ARB (-arb_limit) is hit during holding.
+
+    Also flags trades where entry occurred near ARA (potential liquidity risk).
+    ARB = Auto Rejection Below (IDX price floor per session).
+    ARA = Auto Rejection Above (IDX price ceiling per session).
+    """
+    date_to_candle = {c["date"]: c for c in candles}
+    candle_dates   = [c["date"] for c in candles]
+    date_index     = {d: i for i, d in enumerate(candle_dates)}
+
+    result = []
+    for t in trades:
+        entry_i = date_index.get(t["entry_date"])
+        exit_i  = date_index.get(t["exit_date"])
+        if entry_i is None or exit_i is None:
+            result.append({**t, "ara_arb_flag": "unknown"})
+            continue
+
+        arb_hit    = False
+        arb_date   = None
+        arb_price  = None
+        ara_entry  = False
+
+        # Check ARA at entry (entry candle high ≥ prev_close * 1.20)
+        if entry_i > 0:
+            prev_c = candles[entry_i - 1]["close"]
+            if candles[entry_i]["high"] >= prev_c * (1 + ara_limit * 0.9):
+                ara_entry = True
+
+        # Scan holding period for ARB
+        for j in range(entry_i + 1, min(exit_i + 1, len(candles))):
+            prev_close_j = candles[j - 1]["close"]
+            low_j        = candles[j]["low"]
+            arb_floor    = prev_close_j * (1 - arb_limit)
+            if low_j <= arb_floor:
+                arb_hit   = True
+                arb_date  = candles[j]["date"]
+                arb_price = round(arb_floor, 4)
+                break
+
+        flag = []
+        if ara_entry:
+            flag.append("ARA_ENTRY_RISK")
+        if arb_hit:
+            flag.append("ARB_TRIGGERED")
+
+        extra = {"ara_arb_flag": ", ".join(flag) if flag else "clean"}
+        if arb_hit:
+            # Override exit to ARB level
+            arb_return = round(
+                (arb_price - t["entry_price"]) / t["entry_price"] * 100
+                + t.get("cost_pct", 0), 3)
+            extra.update({
+                "exit_date":   arb_date,
+                "exit_price":  arb_price,
+                "return_pct":  arb_return,
+                "exit_reason": f"ARB triggered at {arb_price}",
+            })
+
+        result.append({**t, **extra})
+    return result
+
+
+def _build_cia_summary(trades: list, candles: list) -> dict:
+    """Additional CIA-specific trade summary."""
+    if not trades:
+        return {}
+    ara_risk  = sum(1 for t in trades if "ARA_ENTRY_RISK"   in str(t.get("ara_arb_flag", "")))
+    arb_hits  = sum(1 for t in trades if "ARB_TRIGGERED"    in str(t.get("ara_arb_flag", "")))
+    clean     = sum(1 for t in trades if t.get("ara_arb_flag") == "clean")
+    avg_hold  = None
+    hold_days = []
+    for t in trades:
+        try:
+            e = datetime.fromisoformat(t["entry_date"])
+            x = datetime.fromisoformat(t["exit_date"])
+            hold_days.append(max(1, (x - e).days))
+        except Exception:
+            pass
+    if hold_days:
+        avg_hold = round(sum(hold_days) / len(hold_days), 1)
+    return {
+        "clean_trades":         clean,
+        "ara_entry_risk_count": ara_risk,
+        "arb_stopped_count":    arb_hits,
+        "avg_hold_days":        avg_hold,
+    }
+
+
 # ─── Transaction Costs ────────────────────────────────────────────────────────
 
 def _apply_costs(trades: list[dict], commission_pct: float, slippage_pct: float) -> list[dict]:
@@ -500,6 +875,211 @@ def run_backtest(
         result["equity_curve"] = _build_equity_curve(trades, initial_capital)
 
     return result
+
+
+# ─── Public API: run_cia_backtest ─────────────────────────────────────────────
+
+def run_cia_backtest(
+    symbol: str,
+    strategy: str,
+    period: str = "1y",
+    initial_capital: float = 10_000_000.0,
+    commission_buy_pct: float = _IDX_COMMISSION_BUY,
+    commission_sell_pct: float = _IDX_COMMISSION_SELL,
+    slippage_pct: float = 0.05,
+    tight_pct: float = 5.0,
+    kamehameha_ratio: float = 2.5,
+    ara_guard: bool = True,
+    ara_arb_simulation: bool = True,
+    include_trade_log: bool = False,
+    include_equity_curve: bool = False,
+) -> dict:
+    """Run CIA-style IDX backtest for one symbol.
+
+    CIA strategies simulate real IDX trading rules:
+      - ARA guard: skip entry if candle is already at +20% auto-rejection
+      - ARB simulation: force exit if price hits -20% floor during holding
+      - IDX broker commission: buy (0.15%) + sell (0.25%) separate
+
+    Args:
+        symbol:              IDX ticker, e.g. "BBCA" (auto-appends .JK)
+        strategy:            cia_superketat | cia_ketat | cia_kamehameha |
+                             cia_rainbow | cia_star | cia_sunflower
+        period:              1mo | 3mo | 6mo | 1y | 2y
+        initial_capital:     Starting capital in IDR (default 10 juta)
+        commission_buy_pct:  Buy-side broker fee % (default 0.15%)
+        commission_sell_pct: Sell-side broker fee % (default 0.25%)
+        slippage_pct:        Slippage per side % (default 0.05%)
+        tight_pct:           Max % distance to MA for "ketat" condition (default 5%)
+        kamehameha_ratio:    Min volume multiplier vs V60 (default 2.5×)
+        ara_guard:           Skip entry on ARA day (default True)
+        ara_arb_simulation:  Force exit at ARB floor if hit (default True)
+        include_trade_log:   Include full per-trade log
+        include_equity_curve: Include equity curve data
+    """
+    strategy = strategy.lower().strip()
+    period   = period.lower().strip()
+
+    if strategy not in _CIA_STRATEGY_MAP:
+        return {"error": (f"Unknown CIA strategy '{strategy}'. "
+                          f"Choose: {', '.join(_CIA_STRATEGY_MAP)}")}
+    if period not in _VALID_PERIODS:
+        return {"error": f"Invalid period '{period}'. Choose: {', '.join(_VALID_PERIODS)}"}
+
+    yf_symbol = symbol.upper().strip()
+    if not yf_symbol.endswith(".JK"):
+        yf_symbol = yf_symbol + ".JK"
+
+    try:
+        candles = _fetch_ohlcv(yf_symbol, period, "1d")
+    except Exception as e:
+        return {"error": f"Failed to fetch data for '{yf_symbol}': {e}"}
+
+    min_bars = 70 if strategy == "cia_rainbow" else 30
+    if strategy in ("cia_kamehameha", "cia_star"):
+        min_bars = 65
+    if len(candles) < min_bars:
+        return {"error": (f"Not enough data ({len(candles)} bars). "
+                          f"Need ≥{min_bars} bars. Use a longer period.")}
+
+    fn_kwargs = {
+        "tight_pct":        tight_pct,
+        "kamehameha_ratio": kamehameha_ratio,
+        "ara_guard":        ara_guard,
+    }
+    raw_trades = _CIA_STRATEGY_MAP[strategy](candles, **fn_kwargs)
+    trades     = _apply_idx_costs(raw_trades, commission_buy_pct,
+                                   commission_sell_pct, slippage_pct)
+
+    if ara_arb_simulation:
+        trades = _apply_arb_guard(trades, candles)
+
+    metrics    = _calc_metrics(trades, initial_capital)
+    bnh        = _buy_and_hold_return(candles)
+    cia_extra  = _build_cia_summary(trades, candles)
+
+    result = {
+        "symbol":                  symbol.upper(),
+        "yf_symbol":               yf_symbol,
+        "strategy":                strategy,
+        "strategy_label":          _CIA_STRATEGY_LABELS[strategy],
+        "period":                  period,
+        "candles_analyzed":        len(candles),
+        "date_from":               candles[0]["date"],
+        "date_to":                 candles[-1]["date"],
+        "initial_capital_idr":     round(initial_capital, 0),
+        "commission_buy_pct":      commission_buy_pct,
+        "commission_sell_pct":     commission_sell_pct,
+        "slippage_pct":            slippage_pct,
+        "tight_pct":               tight_pct,
+        "kamehameha_ratio":        kamehameha_ratio,
+        "ara_guard_enabled":       ara_guard,
+        "arb_simulation_enabled":  ara_arb_simulation,
+        **metrics,
+        **cia_extra,
+        "buy_and_hold_return_pct": bnh,
+        "vs_buy_and_hold_pct":     round(metrics["total_return_pct"] - bnh, 2),
+        "recent_trades":           trades[-5:],
+        "data_source":             "Yahoo Finance (.JK)",
+        "disclaimer":              "Past performance does not guarantee future results. For educational use only.",
+        "timestamp":               datetime.now(timezone.utc).isoformat(),
+    }
+
+    if include_trade_log:
+        result["trade_log"] = _build_trade_log(trades, initial_capital)
+    if include_equity_curve:
+        result["equity_curve"] = _build_equity_curve(trades, initial_capital)
+
+    return result
+
+
+# ─── Public API: compare_cia_strategies ──────────────────────────────────────
+
+def compare_cia_strategies(
+    symbol: str,
+    period: str = "1y",
+    initial_capital: float = 10_000_000.0,
+    commission_buy_pct: float = _IDX_COMMISSION_BUY,
+    commission_sell_pct: float = _IDX_COMMISSION_SELL,
+    slippage_pct: float = 0.05,
+    tight_pct: float = 5.0,
+    kamehameha_ratio: float = 2.5,
+    ara_guard: bool = True,
+    ara_arb_simulation: bool = True,
+) -> dict:
+    """Run all 6 CIA strategies on one IDX symbol and rank by performance."""
+    period = period.lower().strip()
+    if period not in _VALID_PERIODS:
+        return {"error": f"Invalid period '{period}'. Choose: {', '.join(_VALID_PERIODS)}"}
+
+    yf_symbol = symbol.upper().strip()
+    if not yf_symbol.endswith(".JK"):
+        yf_symbol = yf_symbol + ".JK"
+
+    try:
+        candles = _fetch_ohlcv(yf_symbol, period, "1d")
+    except Exception as e:
+        return {"error": f"Failed to fetch data for '{yf_symbol}': {e}"}
+
+    if len(candles) < 65:
+        return {"error": f"Not enough data ({len(candles)} bars). Need ≥65 bars."}
+
+    fn_kwargs = {
+        "tight_pct":        tight_pct,
+        "kamehameha_ratio": kamehameha_ratio,
+        "ara_guard":        ara_guard,
+    }
+
+    ranking = []
+    for strat, fn in _CIA_STRATEGY_MAP.items():
+        raw    = fn(candles, **fn_kwargs)
+        trades = _apply_idx_costs(raw, commission_buy_pct, commission_sell_pct, slippage_pct)
+        if ara_arb_simulation:
+            trades = _apply_arb_guard(trades, candles)
+        m      = _calc_metrics(trades, initial_capital)
+        cia_x  = _build_cia_summary(trades, candles)
+        ranking.append({
+            "strategy":           strat,
+            "strategy_label":     _CIA_STRATEGY_LABELS[strat],
+            "total_return_pct":   m["total_return_pct"],
+            "win_rate_pct":       m["win_rate_pct"],
+            "total_trades":       m["total_trades"],
+            "profit_factor":      m["profit_factor"],
+            "sharpe_ratio":       m["sharpe_ratio"],
+            "max_drawdown_pct":   m["max_drawdown_pct"],
+            "avg_hold_days":      cia_x.get("avg_hold_days"),
+            "arb_stopped_count":  cia_x.get("arb_stopped_count", 0),
+            "clean_trades":       cia_x.get("clean_trades", 0),
+        })
+
+    ranking.sort(key=lambda x: x["total_return_pct"], reverse=True)
+    for i, r in enumerate(ranking):
+        r["rank"] = i + 1
+
+    bnh = _buy_and_hold_return(candles)
+
+    return {
+        "symbol":                  symbol.upper(),
+        "yf_symbol":               yf_symbol,
+        "period":                  period,
+        "candles_analyzed":        len(candles),
+        "date_from":               candles[0]["date"],
+        "date_to":                 candles[-1]["date"],
+        "initial_capital_idr":     round(initial_capital, 0),
+        "buy_and_hold_return_pct": bnh,
+        "best_cia_strategy":       ranking[0]["strategy"] if ranking else None,
+        "ranking":                 ranking,
+        "parameters": {
+            "tight_pct":        tight_pct,
+            "kamehameha_ratio": kamehameha_ratio,
+            "ara_guard":        ara_guard,
+            "arb_simulation":   ara_arb_simulation,
+            "commission_buy":   commission_buy_pct,
+            "commission_sell":  commission_sell_pct,
+        },
+        "disclaimer": "Past performance does not guarantee future results. For educational use only.",
+        "timestamp":  datetime.now(timezone.utc).isoformat(),
+    }
 
 
 # ─── Public API: compare_strategies ──────────────────────────────────────────
