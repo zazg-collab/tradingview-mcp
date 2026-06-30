@@ -1095,6 +1095,29 @@ _CIA_SETUP_KEYWORDS = [
     "STAR", "SUNFLOWER", "ARA", "ARB", "BREAKOUT",
 ]
 
+# Words that match 4-letter uppercase regex but are NOT IDX ticker codes.
+# Sourced from CIAbot message format + common Indonesian/English words.
+_NON_TICKER_WORDS: frozenset = frozenset({
+    # CIAbot metric labels
+    "VNOW", "VTOT", "JUTA", "LAST", "RISK",
+    # CIA keywords (setups, not tickers)
+    "STAR", "KAME", "KETAT", "SUPER", "KAME",
+    # Indonesian words
+    "JUAL", "BELI", "BISA", "DARI", "ATAU", "YANG", "AKAN",
+    "DENGAN", "TIDAK", "HARI", "TAPI", "PADA",
+    # English common 4-letter words
+    "SELL", "WAIT", "BEST", "HIGH", "OPEN", "BULL", "BEAR",
+    "HOLD", "FULL", "GOOD", "WITH", "FROM", "ALSO", "EVEN",
+    "JUST", "SOME", "MOST", "ONLY", "EACH", "BOTH", "THEN",
+    "THAN", "THIS", "THAT", "THEY", "THEM", "YOUR", "HAVE",
+    "BEEN", "WILL", "WHAT", "WHEN", "COME", "GIVE", "FIND",
+    "KNOW", "NEED", "MEAN", "LOOK", "BACK", "WELL", "LONG",
+    "AWAY", "HERE", "MORE", "LESS", "MUCH", "VERY", "ALSO",
+    "OVER", "TAKE", "MAKE", "USED", "NEXT", "STOP", "SUCH",
+    "INTO", "SAME", "MANY", "EACH", "SAID", "NEAR", "AREA",
+    "LAST", "REAL", "LETS", "LIKE", "MAKE", "NEED", "ONCE",
+})
+
 
 def telegram_cia_alerts(
     days_back: int = 7,
@@ -1142,8 +1165,11 @@ def telegram_cia_alerts(
             text_upper = text_str.upper()
 
             # Extract 4-letter uppercase IDX ticker codes from text
-            raw_tickers = re.findall(r'\b[A-Z]{4}\b', text_upper)
-            # Merge with stored tickers column
+            raw_tickers = [
+                t for t in re.findall(r'\b[A-Z]{4}\b', text_upper)
+                if t not in _NON_TICKER_WORDS
+            ]
+            # Merge with stored tickers column (already clean)
             stored = [t.strip() for t in (tickers_col or "").split(",") if t.strip()]
             tickers_detected = sorted(set(raw_tickers) | set(stored))
 
