@@ -293,6 +293,136 @@ _ENTRY_TIMING_RANK: dict = {
 }
 
 
+def _estimate_ara_probability(
+    setups:        list,
+    entry_timing:  str,
+    change_pct:    float,
+    vol_ratio:     Optional[float],
+    rsi:           Optional[float],
+    tg_mentions:   int = 0,
+    ciabot_alerts: int = 0,
+) -> dict:
+    """
+    Estimasi % peluang ARA (+20% besok) berdasarkan kualitas setup CIA.
+
+    DISCLAIMER: Ini heuristik — bukan prediksi pasti. Faktor terbesar yang tidak
+    bisa dikontrol: kondisi IHSG hari itu. Base rate ARA sembarang saham = ~1-2%.
+
+    Returns:
+        {
+          "pct"  : float,   # 0.0 – 35.0
+          "label": str,     # SANGAT RENDAH / RENDAH / MODERAT / TINGGI / SANGAT TINGGI
+          "note" : str,     # penjelasan singkat driver utama
+        }
+    """
+    # ── 1. Base rate dari setup terkuat ──────────────────────────────────────
+    if SETUP_STAR in setups:
+        base = 12.0
+    elif SETUP_SUPERKETAT in setups and SETUP_KAMEHAMEHA in setups:
+        base = 10.0
+    elif SETUP_SUPERKETAT in setups:
+        base = 9.0
+    elif SETUP_KAMEHAMEHA in setups and SETUP_RAINBOW in setups:
+        base = 9.0
+    elif SETUP_KETAT in setups and SETUP_KAMEHAMEHA in setups:
+        base = 8.0
+    elif SETUP_KETAT in setups:
+        base = 6.0
+    elif SETUP_KAMEHAMEHA in setups:
+        base = 7.0
+    else:
+        base = 2.0
+
+    # ── 2. Entry timing multiplier (paling berpengaruh) ──────────────────────
+    _timing_mult = {
+        "FRESH"                : 1.5,
+        "RUNNING"              : 0.65,
+        "HIGH_RISK_ALREADY_RAN": 0.12,   # butuh +20% lagi → total 2-day +26-30%, sangat jarang
+        "EXTENDED"             : 0.30,
+        "ILLIQUID"             : 0.0,
+    }
+    multiplier = _timing_mult.get(entry_timing, 1.0)
+    pct = base * multiplier
+
+    # ── 3. Bonus / penalti tambahan ──────────────────────────────────────────
+    notes = []
+
+    # SUNFLOWER = fresh breakout setelah gap panjang → bonus signifikan
+    has_sunflower = any(str(s).startswith("SUNFLOWER") for s in setups)
+    if has_sunflower:
+        pct += 4.0
+        notes.append("Sunflower +4%")
+
+    # EMPTY_ZONE = potensi distribusi → penalti besar
+    has_empty_zone = any(str(s).startswith("EMPTY_ZONE") for s in setups)
+    if has_empty_zone:
+        pct -= 6.0
+        notes.append("EmptyZone -6%")
+
+    # CIAbot alert = double-confirmed
+    if ciabot_alerts > 0:
+        pct += 3.0
+        notes.append("CIAbot +3%")
+
+    # Volume spike besar = momentum kuat
+    if vol_ratio is not None:
+        if vol_ratio > 10:
+            pct += 3.0
+            notes.append(f"Vol {vol_ratio:.1f}x +3%")
+        elif vol_ratio > 5:
+            pct += 2.0
+            notes.append(f"Vol {vol_ratio:.1f}x +2%")
+
+    # RSI tidak overbought = masih ada ruang
+    if rsi is not None:
+        if rsi < 55:
+            pct += 2.0
+            notes.append("RSI segar +2%")
+        elif rsi > 75:
+            pct -= 4.0
+            notes.append("RSI overbought -4%")
+
+    # TG mentions tinggi tapi sudah naik = lagging signal (terlambat)
+    if tg_mentions > 10 and entry_timing in ("RUNNING", "HIGH_RISK_ALREADY_RAN"):
+        pct -= 2.0
+        notes.append("TG late -2%")
+
+    # ── 4. Cap dan label ─────────────────────────────────────────────────────
+    pct = max(0.5, min(35.0, round(pct, 1)))
+
+    if pct >= 25:
+        label = "SANGAT TINGGI"
+    elif pct >= 18:
+        label = "TINGGI"
+    elif pct >= 10:
+        label = "MODERAT"
+    elif pct >= 5:
+        label = "RENDAH"
+    else:
+        label = "SANGAT RENDAH"
+
+    # ── 5. Note utama ─────────────────────────────────────────────────────────
+    if entry_timing == "HIGH_RISK_ALREADY_RAN":
+        main_note = (
+            f"Sudah naik +{change_pct:.1f}% hari ini → "
+            f"butuh +20% lagi = total ~+{round((1 + change_pct/100) * 1.20 * 100 - 100, 0):.0f}% "
+            f"dalam 2 hari. Sangat jarang tanpa katalis besar."
+        )
+    elif entry_timing == "EXTENDED":
+        main_note = "Terlalu jauh dari MA → risiko pullback lebih tinggi dari potensi ARA."
+    elif entry_timing == "FRESH":
+        main_note = "Setup belum jalan → full potensi tersisa untuk entry sore/besok."
+    elif entry_timing == "RUNNING":
+        main_note = f"Sudah naik +{change_pct:.1f}% hari ini → momentum sebagian sudah terpakai."
+    else:
+        main_note = ""
+
+    if notes:
+        main_note += " (" + ", ".join(notes) + ")"
+
+    return {"pct": pct, "label": label, "note": main_note.strip()}
+
+
 def _check_historical_setups(
     ticker:    str,
     tight_pct: float,
@@ -546,7 +676,12 @@ def scan_cia_setups(
         rsi    = row.get("RSI")
         sector = str(row.get("sector") or get_sector_label(ticker))
 
-        _change = round(change, 2)
+        _change      = round(change, 2)
+        _entry_timing = _get_entry_timing(
+            change_pct=_change,
+            ma20_pct=ma_dist.get("ma20_pct"),
+            avg_vol=avg_vol,
+        )
         entry: dict = {
             "ticker"          : ticker,
             "name"            : str(row.get("name", "")),
@@ -556,10 +691,15 @@ def scan_cia_setups(
             "rsi"             : round(rsi, 1) if rsi else None,
             "setups"          : setups,
             "sector"          : sector,
-            "entry_timing"    : _get_entry_timing(
+            "entry_timing"    : _entry_timing,
+            "ara_probability" : _estimate_ara_probability(
+                setups=setups,
+                entry_timing=_entry_timing,
                 change_pct=_change,
-                ma20_pct=ma_dist.get("ma20_pct"),
-                avg_vol=avg_vol,
+                vol_ratio=ma_dist.get("vol_ratio_v60"),
+                rsi=round(rsi, 1) if rsi else None,
+                tg_mentions=0,    # akan di-update setelah TG query jika perlu
+                ciabot_alerts=0,
             ),
             "telegram_signal" : _tg_signal_for_ticker(ticker),
             **ma_dist,
@@ -734,15 +874,23 @@ def scan_cia_tg_confirmed(
         # Return CIA-only results with zeroed TG fields
         results = []
         for entry in candidates[:limit]:
-            setups = entry.get("setups", [])
-            cia_score = _cia_setup_score(setups)
+            setups     = entry.get("setups", [])
+            cia_score  = _cia_setup_score(setups)
+            _et        = entry.get("entry_timing", "FRESH")
+            _chg       = entry.get("change_pct", 0.0) or 0.0
             r = {
                 "ticker"            : entry["ticker"],
                 "price"             : entry.get("price"),
-                "change_pct"        : entry.get("change_pct"),
+                "change_pct"        : _chg,
                 "setups"            : setups,
                 "vol_ratio_v60"     : entry.get("vol_ratio_v60"),
-                "entry_timing"      : entry.get("entry_timing", "FRESH"),
+                "entry_timing"      : _et,
+                "ara_probability"   : _estimate_ara_probability(
+                    setups=setups, entry_timing=_et, change_pct=_chg,
+                    vol_ratio=entry.get("vol_ratio_v60"),
+                    rsi=entry.get("rsi"),
+                    tg_mentions=0, ciabot_alerts=0,
+                ),
                 "tg_mentions"       : 0,
                 "ciabot_alerts"     : 0,
                 "double_confirmed"  : False,
@@ -812,13 +960,21 @@ def scan_cia_tg_confirmed(
 
         double_confirmed = (tg_mentions >= min_tg_mentions) and (ciabot_alerts > 0)
 
+        _et  = entry.get("entry_timing", "FRESH")
+        _chg = entry.get("change_pct", 0.0) or 0.0
         results.append({
             "ticker"            : ticker,
             "price"             : entry.get("price"),
-            "change_pct"        : entry.get("change_pct"),
+            "change_pct"        : _chg,
             "setups"            : setups,
             "vol_ratio_v60"     : entry.get("vol_ratio_v60"),
-            "entry_timing"      : entry.get("entry_timing", "FRESH"),
+            "entry_timing"      : _et,
+            "ara_probability"   : _estimate_ara_probability(
+                setups=setups, entry_timing=_et, change_pct=_chg,
+                vol_ratio=entry.get("vol_ratio_v60"),
+                rsi=entry.get("rsi"),
+                tg_mentions=tg_mentions, ciabot_alerts=ciabot_alerts,
+            ),
             "tg_mentions"       : tg_mentions,
             "ciabot_alerts"     : ciabot_alerts,
             "double_confirmed"  : double_confirmed,
