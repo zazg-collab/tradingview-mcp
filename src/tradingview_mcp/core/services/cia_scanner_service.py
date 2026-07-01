@@ -142,6 +142,12 @@ DEFAULT_TIGHT_PCT        = 5.0   # ≤5% jarak ke MA = "ketat"
 DEFAULT_KAMEHAMEHA_RATIO = 2.5   # volume > 2.5x V60 — sama persis dengan CIA original
 DEFAULT_MIN_VOL_IDR      = 0     # CIAbot tidak filter volume sama sekali (SDRA 134jt masuk)
 
+# ── Entry timing / risk thresholds ───────────────────────────────────────────
+MIN_DAILY_LOT_VOLUME   = 10_000  # Minimum avg V60 (lot) — filter XCID (700), STTP (2800)
+ALREADY_RAN_PCT        = 5.0     # change% hari ini → HIGH_RISK_ALREADY_RAN (butuh +20% lagi)
+EXTENDED_MA20_PCT      = 12.0    # % di atas MA20 → EXTENDED (terlalu jauh, risiko pullback)
+RUNNING_PCT            = 2.0     # change% → RUNNING (sedang jalan, entry kurang ideal)
+
 # ── Setup labels ──────────────────────────────────────────────────────────────
 SETUP_SUPERKETAT  = "SUPERKETAT"
 SETUP_KETAT       = "KETAT"
@@ -253,6 +259,40 @@ def _classify(
     return setups, ma_dist
 
 
+def _get_entry_timing(
+    change_pct: float,
+    ma20_pct:   Optional[float],
+    avg_vol:    Optional[float],
+) -> str:
+    """
+    Tentukan timing entry setup hari ini:
+
+    ILLIQUID           — avg V60 < MIN_DAILY_LOT_VOLUME (susah keluar, skip)
+    EXTENDED           — jarak ke MA20 > EXTENDED_MA20_PCT (terlalu jauh, risiko pullback)
+    HIGH_RISK_ALREADY_RAN — naik >ALREADY_RAN_PCT% hari ini (butuh +20% lagi esok untuk ARA)
+    RUNNING            — naik RUNNING_PCT..ALREADY_RAN_PCT% (sedang jalan, entry kurang ideal)
+    FRESH              — belum naik, setup baru siap entry sore/besok ✅
+    """
+    if avg_vol is not None and avg_vol < MIN_DAILY_LOT_VOLUME:
+        return "ILLIQUID"
+    if ma20_pct is not None and ma20_pct > EXTENDED_MA20_PCT:
+        return "EXTENDED"
+    if change_pct >= ALREADY_RAN_PCT:
+        return "HIGH_RISK_ALREADY_RAN"
+    if change_pct >= RUNNING_PCT:
+        return "RUNNING"
+    return "FRESH"
+
+
+_ENTRY_TIMING_RANK: dict = {
+    "FRESH"                : 0,
+    "RUNNING"              : 1,
+    "HIGH_RISK_ALREADY_RAN": 2,
+    "EXTENDED"             : 3,
+    "ILLIQUID"             : 9,   # seharusnya sudah di-filter sebelum masuk results
+}
+
+
 def _check_historical_setups(
     ticker:    str,
     tight_pct: float,
@@ -358,14 +398,15 @@ def _check_historical_setups(
 
 
 def scan_cia_setups(
-    setup_filter:      str   = "all",
-    min_volume_idr:    float = DEFAULT_MIN_VOL_IDR,
-    index_filter:      str   = "",
-    limit:             int   = 50,
-    timeframe:         str   = "1D",
-    tight_pct:         float = DEFAULT_TIGHT_PCT,
-    kamehameha_ratio:  float = DEFAULT_KAMEHAMEHA_RATIO,
-    min_above_ma20:    bool  = True,
+    setup_filter:       str   = "all",
+    min_volume_idr:     float = DEFAULT_MIN_VOL_IDR,
+    index_filter:       str   = "",
+    limit:              int   = 50,
+    timeframe:          str   = "1D",
+    tight_pct:          float = DEFAULT_TIGHT_PCT,
+    kamehameha_ratio:   float = DEFAULT_KAMEHAMEHA_RATIO,
+    min_above_ma20:     bool  = True,
+    min_avg_lot_volume: int   = MIN_DAILY_LOT_VOLUME,
 ) -> dict:
     """
     Scan seluruh IDX (~866 saham) untuk CIA-specific setups.
@@ -483,6 +524,10 @@ def scan_cia_setups(
         ma200 = row.get("SMA200")
         avg_vol = row.get("average_volume_60d_calc")
 
+        # Filter minimum likuiditas (V60) — skip saham susah keluar (XCID vol 700, STTP vol 2800)
+        if min_avg_lot_volume > 0 and (avg_vol is None or avg_vol < min_avg_lot_volume):
+            continue
+
         # Filter above MA20 jika diminta
         if min_above_ma20 and ma20 and close <= ma20:
             continue
@@ -501,15 +546,21 @@ def scan_cia_setups(
         rsi    = row.get("RSI")
         sector = str(row.get("sector") or get_sector_label(ticker))
 
+        _change = round(change, 2)
         entry: dict = {
             "ticker"          : ticker,
             "name"            : str(row.get("name", "")),
             "price"           : round(close),
-            "change_pct"      : round(change, 2),
+            "change_pct"      : _change,
             "volume_idr"      : round(vol_idr / 1_000_000, 1),
             "rsi"             : round(rsi, 1) if rsi else None,
             "setups"          : setups,
             "sector"          : sector,
+            "entry_timing"    : _get_entry_timing(
+                change_pct=_change,
+                ma20_pct=ma_dist.get("ma20_pct"),
+                avg_vol=avg_vol,
+            ),
             "telegram_signal" : _tg_signal_for_ticker(ticker),
             **ma_dist,
         }
@@ -555,16 +606,19 @@ def scan_cia_setups(
     }
     active_setups = _filter_map.get(setup_filter, list(buckets.keys()))
 
-    # Sort each bucket: STAR/superketat by tightest MA, kamehameha by vol_ratio
-    def _sort_key(entry: dict, stype: str) -> float:
+    # Sort each bucket: primary = entry_timing rank (FRESH first), secondary = tightness/vol
+    def _sort_key(entry: dict, stype: str) -> tuple:
+        timing_rank = _ENTRY_TIMING_RANK.get(entry.get("entry_timing", "FRESH"), 0)
         if stype in (SETUP_KAMEHAMEHA,):
-            return -(entry.get("vol_ratio_v60") or 0)
-        # For MA setups: sort by minimum MA distance (tightest = best entry)
-        dists = [
-            v for k, v in entry.items()
-            if k.endswith("_pct") and isinstance(v, (int, float)) and v >= 0
-        ]
-        return min(dists) if dists else 999
+            secondary: float = -(entry.get("vol_ratio_v60") or 0)
+        else:
+            # For MA setups: sort by minimum MA distance (tightest = best entry)
+            dists = [
+                v for k, v in entry.items()
+                if k.endswith("_pct") and isinstance(v, (int, float)) and v >= 0
+            ]
+            secondary = min(dists) if dists else 999.0
+        return (timing_rank, secondary)
 
     result_setups: dict = {}
     for sname in active_setups:
@@ -577,13 +631,14 @@ def scan_cia_setups(
 
     return {
         "scan_info": {
-            "timeframe"        : timeframe,
-            "index_filter"     : index_filter or "All IDX",
-            "tight_pct"        : tight_pct,
-            "kamehameha_ratio" : kamehameha_ratio,
-            "min_volume_idr_M" : round(min_volume_idr / 1_000_000, 0),
-            "min_above_ma20"   : min_above_ma20,
-            "setup_filter"     : setup_filter,
+            "timeframe"           : timeframe,
+            "index_filter"        : index_filter or "All IDX",
+            "tight_pct"           : tight_pct,
+            "kamehameha_ratio"    : kamehameha_ratio,
+            "min_volume_idr_M"    : round(min_volume_idr / 1_000_000, 0),
+            "min_avg_lot_volume"  : min_avg_lot_volume,
+            "min_above_ma20"      : min_above_ma20,
+            "setup_filter"        : setup_filter,
         },
         "total_scanned"   : total,
         "total_with_setup": total_with_setup,
@@ -687,6 +742,7 @@ def scan_cia_tg_confirmed(
                 "change_pct"        : entry.get("change_pct"),
                 "setups"            : setups,
                 "vol_ratio_v60"     : entry.get("vol_ratio_v60"),
+                "entry_timing"      : entry.get("entry_timing", "FRESH"),
                 "tg_mentions"       : 0,
                 "ciabot_alerts"     : 0,
                 "double_confirmed"  : False,
@@ -762,14 +818,18 @@ def scan_cia_tg_confirmed(
             "change_pct"        : entry.get("change_pct"),
             "setups"            : setups,
             "vol_ratio_v60"     : entry.get("vol_ratio_v60"),
+            "entry_timing"      : entry.get("entry_timing", "FRESH"),
             "tg_mentions"       : tg_mentions,
             "ciabot_alerts"     : ciabot_alerts,
             "double_confirmed"  : double_confirmed,
             "confirmation_score": conf_score,
         })
 
-    # ── Step 5: Sort by confirmation_score desc, apply limit ──────────────────
-    results.sort(key=lambda x: x["confirmation_score"], reverse=True)
+    # ── Step 5: Sort by entry_timing rank first (FRESH first), then confirmation_score desc
+    results.sort(key=lambda x: (
+        _ENTRY_TIMING_RANK.get(x.get("entry_timing", "FRESH"), 0),
+        -x["confirmation_score"],
+    ))
     results = results[:limit]
 
     double_confirmed_count = sum(1 for r in results if r["double_confirmed"])
